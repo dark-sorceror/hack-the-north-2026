@@ -27,7 +27,7 @@ for g in dialout gpio; do
 done
 GROUPS_OK="${GROUPS_OK# }"
 
-python3 -c "import sys; assert sys.version_info >= (3, 9), sys.version; print('python', sys.version.split()[0])"
+python3 -c "import sys; assert sys.version_info >= (3, 10), sys.version; print('python', sys.version.split()[0])"
 python3 -S -c "import sys; sys.path.insert(0, '$HERE/src'); import retriever.bridge.server; print('bridge imports with stdlib only: ok')"
 
 sed -e "s|__USER__|$USER|" -e "s|__HOME__|$HOME|" \
