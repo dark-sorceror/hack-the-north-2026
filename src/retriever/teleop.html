@@ -64,8 +64,13 @@
       <button class="s" data-k="b">S</button><button class="d" data-k="r">D</button>
     </div>
     <div class="gears" id="gears"></div>
-    <div id="auto"><span class="st">Click the map</span> to send it there.
+    <div id="auto"><span class="st">Click the map</span> to send it there,
+      <b>shift-click</b> to go there and come back.
       <span class="k">Right-click, space or any drive key cancels.</span></div>
+    <div class="row">
+      <button class="act" id="homebtn">&#8962; go home (H)</button>
+      <button class="act" id="sethomebtn">set home here</button>
+    </div>
     <table>
       <tr><td class="k">asked</td><td class="v" id="cmd">–</td></tr>
       <tr><td class="k">measured</td><td class="v" id="meas">–</td></tr>
@@ -79,7 +84,8 @@
       <button class="act" id="resetbtn">reset pose (R)</button>
     </div>
     <div class="note">Hold <b>W A S D</b> or arrows to drive; let go to stop.
-      <b>1 2 3</b> speed · <b>space</b> stop now · <b>Esc</b> e-stop (latched on the Pi).
+      <b>1 2 3</b> speed · <b>space</b> stop now · <b>Esc</b> e-stop (latched on the Pi) ·
+      <b>H</b> home.
       Leaving this tab stops the robot. Grid: 0.5 m. Trail = odometry.
       Click-to-go aims at where the robot <i>believes</i> that spot is.
       Map: black = seen solid, white = seen clear, red tint = too close for the robot's centre,
@@ -121,6 +127,7 @@ addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); held.clear(); lastSent = ''; post('/halt'); paintPad(); }
   else if (e.code === 'Escape') { held.clear(); post('/estop'); paintPad(); }
   else if (e.code === 'KeyR') { post('/reset'); }
+  else if (e.code === 'KeyH') { goHome(); }
   else if (/^Digit[1-9]$/.test(e.code)) { setGear(+e.code.slice(5) - 1); }
 });
 addEventListener('keyup', e => { const k = KEYS[e.code]; if (k) { held.delete(k); send(true); } });
@@ -151,6 +158,16 @@ function paintGears() {
   [...box.children].forEach((b, i) => b.classList.toggle('sel', i === gear));
 }
 $('estopbtn').onclick = () => { held.clear(); post('/estop'); };
+async function command(path, body) {
+  try {
+    const res = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                                   body: JSON.stringify(body || {})});
+    autoErr = res.ok ? '' : ((await res.json().catch(() => ({}))).error || res.statusText);
+  } catch (err) { autoErr = 'teleop server unreachable'; }
+}
+function goHome() { held.clear(); paintPad(); command('/home'); }
+$('homebtn').onclick = goHome;
+$('sethomebtn').onclick = () => command('/sethome');
 $('clearbtn').onclick = () => post('/clear');
 $('resetbtn').onclick = () => post('/reset');
 
@@ -215,6 +232,12 @@ function draw() {
       cx.fillRect(sx(wx, wy) - 2, sy(wx, wy) - 2, 4, 4);
     }
   }
+  if (snap.home) {                                    // home: a ring with a tick for its heading
+    const [hx, hy, hth] = snap.home, px = sx(hx, hy), py = sy(hx, hy);
+    cx.strokeStyle = css('--ok'); cx.lineWidth = 2.5; cx.beginPath(); cx.arc(px, py, 11, 0, 2 * Math.PI);
+    cx.moveTo(px, py); cx.lineTo(px - Math.sin(hth) * 20, py - Math.cos(hth) * 20); cx.stroke();
+    cx.fillStyle = css('--ok'); cx.font = '600 11px ui-monospace,monospace'; cx.fillText('home', px + 14, py + 4);
+  }
   // robot footprint (front, rear, half width) and heading
   const [fr, re, hw] = snap.footprint, c = Math.cos(th), s = Math.sin(th);
   const corner = (bx, by) => [sx(rx + bx * c - by * s, ry + bx * s + by * c), sy(rx + bx * c - by * s, ry + bx * s + by * c)];
@@ -249,11 +272,7 @@ cv.addEventListener('click', async e => {
   const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
   const x = view.rx - (py - view.H / 2) / view.S, y = view.ry - (px - view.W / 2) / view.S;
   held.clear(); paintPad();
-  try {
-    const res = await fetch('/goto', {method:'POST', headers:{'Content-Type':'application/json'},
-                                      body: JSON.stringify({x, y})});
-    autoErr = res.ok ? '' : ((await res.json().catch(() => ({}))).error || res.statusText);
-  } catch (err) { autoErr = 'teleop server unreachable'; }
+  command('/goto', {x, y, round_trip: e.shiftKey});
 });
 cv.addEventListener('contextmenu', e => { e.preventDefault(); post('/cancel'); });
 
@@ -271,7 +290,8 @@ function paint() {
   $('rec').textContent = s.recording ? `● recording ${s.recording.lines} lines → ${s.recording.path}` : '';
   $('cmd').textContent = `${fmt(s.cmd[0])} m/s ${fmt(s.cmd[1])} rad/s`;
   $('meas').textContent = `${fmt(s.meas[0])} m/s ${fmt(s.meas[1])} rad/s`;
-  $('pose').textContent = `${fmt(s.pose[0])}, ${fmt(s.pose[1])} m ${fmt(s.pose[2] * 180 / Math.PI, 0)}°`;
+  const deg = ((s.pose[2] * 180 / Math.PI) % 360 + 540) % 360 - 180;       // -180..180
+  $('pose').textContent = `${fmt(s.pose[0])}, ${fmt(s.pose[1])} m ${fmt(deg, 0)}°`;
   $('odo').textContent = `${s.odometer_m.toFixed(2)} m`;
   const b = s.bubble;
   $('bubble').textContent = !b ? (s.scan ? '' : 'no lidar on the Pi: nothing stops it but you')
@@ -282,12 +302,17 @@ function paint() {
     box.innerHTML = `<span class="st err">Can't go:</span> ${autoErr}`;
   } else if (a.status === 'driving') {
     box.className = 'driving';
-    const how = a.avoiding ? (a.plan && a.plan.status !== 'clear' ? a.plan.reason : 'lidar: way clear')
+    const how = a.avoiding ? (a.plan && a.plan.reason ? a.plan.reason : 'lidar: following the route')
                            : 'no lidar: straight line, nothing stops it but you';
-    box.innerHTML = `<span class="st">Driving</span> to ${a.goal[0].toFixed(2)}, ${a.goal[1].toFixed(2)}`
-      + (a.dist != null ? ` · ${a.dist.toFixed(2)} m to go` : '') + `<br><span class="k">${how}</span>`;
+    const where = a.leg === 'home' ? 'home' : `${a.goal[0].toFixed(2)}, ${a.goal[1].toFixed(2)}`;
+    let what;
+    if (a.phase === 'wait') what = `<span class="st">Arrived</span> (${a.detail}) · heading home in a moment`;
+    else if (a.phase === 'face') what = `<span class="st">Turning</span> to face the way it started`;
+    else what = `<span class="st">Driving</span> to ${where}` + (a.dist != null ? ` · ${a.dist.toFixed(2)} m to go` : '')
+               + (a.then_home ? ' · then home' : '');
+    box.innerHTML = what + `<br><span class="k">${how}</span>`;
   } else if (a.status) {
-    box.className = a.status === 'arrived' ? 'arrived' : a.status === 'gave up' ? 'gaveup' : '';
+    box.className = a.status === 'arrived' || a.status === 'home' ? 'arrived' : a.status === 'gave up' ? 'gaveup' : '';
     box.innerHTML = `<span class="st">${a.status[0].toUpperCase() + a.status.slice(1)}</span>`
       + (a.detail ? `: ${a.detail}` : '') + `<br><span class="k">Click the map to go again.</span>`;
   }
