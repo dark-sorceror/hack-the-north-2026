@@ -126,7 +126,8 @@ class FollowConfig:
     replan_s: float = 0.5
     rotate_deg: float = 55.0          # carrot further off the nose than this: turn on the spot
     k_turn: float = 2.2               # rad/s per rad of heading error, turning on the spot
-    curvature_slow: float = 1.2       # v <= v_max / (1 + this * |curvature|)
+    lat_accel_max: float = 0.5        # m/s^2 sideways in a bend (pursuit.py's rule)
+    align_full_deg: float = 25.0      # full speed while the carrot is this close to the nose
     slow_clearance_m: float = 0.30    # past lethal: full speed beyond this much room
     min_speed_scale: float = 0.3      # ...and this fraction of it right at the lethal edge
     creep_mps: float = 0.06
@@ -317,13 +318,16 @@ class PathFollower:
 
         ld = max(0.05, math.hypot(cx - p.x, cy - p.y))
         curvature = 2.0 * math.sin(alpha) / ld
-        v = lim.v_max / (1.0 + c.curvature_slow * abs(curvature))
+        k = max(abs(curvature), 1e-6)
+        v = min(lim.v_max, lim.w_max / k, math.sqrt(c.lat_accel_max / k))
         room = cm.clearance(p.x, p.y) - cm.config.lethal_m
         scale = c.min_speed_scale + (1.0 - c.min_speed_scale) * max(0.0, min(1.0, room / c.slow_clearance_m))
         v *= scale
         left = math.hypot(end[0] - p.x, end[1] - p.y)
         v = min(v, max(c.creep_mps, c.arrive_gain * left))
-        v *= max(0.0, math.cos(alpha))               # mostly aligned before full speed
+        lo = math.cos(math.radians(c.rotate_deg))
+        hi = math.cos(math.radians(c.align_full_deg))
+        v *= max(0.0, min(1.0, (math.cos(alpha) - lo) / (hi - lo)))   # lined up before fast
         wz = v * curvature
         if abs(wz) > lim.w_max:                       # too tight for this speed: slow, keep the arc
             v *= lim.w_max / abs(wz)
