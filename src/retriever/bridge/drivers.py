@@ -122,6 +122,10 @@ WCH_USB_VID = 0x1A86                # WCH CH34x: the Waveshare USB-RS485 adapter
 DDSM115_MODES = {1: "CURRENT", 2: "VELOCITY", 3: "POSITION"}
 DDSM115_ERROR_BITS = ((0x01, "sensor"), (0x02, "overcurrent"),
                       (0x04, "phase overcurrent"), (0x08, "stall"))
+# Replaces the vendored module's own ImportError, which names an offline wheel
+# this repository does not ship.
+PYSERIAL_MISSING = ("pyserial is not installed, and the DDSM115 wheels need it: on the Pi, "
+                    "pi/setup.sh installs it (python3-serial); elsewhere, pip install pyserial")
 
 
 def _ddsm115() -> Any:
@@ -175,7 +179,10 @@ def find_wheel_port(env: Mapping[str, str] | None = None, comports: Iterable[Any
     if env.get("DDSM115_PORT"):
         return env["DDSM115_PORT"]
     if comports is None:
-        comports = _ddsm115().list_ports.comports()   # ImportError without pyserial
+        try:
+            comports = _ddsm115().list_ports.comports()
+        except ImportError:
+            raise ImportError(PYSERIAL_MISSING) from None
     taken = {os.path.realpath(p) for p in exclude if p}
     wch = [p for p in comports if getattr(p, "vid", None) == WCH_USB_VID
            and os.path.realpath(p.device) not in taken]
@@ -236,7 +243,7 @@ class DDSM115Bus:
         try:
             ser = dd.serial.serial_for_url(port, DDSM115_BAUD, **kwargs)
         except ImportError:
-            raise
+            raise ImportError(PYSERIAL_MISSING) from None
         except Exception as exc:  # SerialException, FileNotFoundError, PermissionError, busy
             raise ConnectionError(f"can't open the wheel bus {port}: {exc}") from exc
         return cls(ser, reply_timeout_s=reply_timeout_s, write_timeout_s=write_timeout_s,
