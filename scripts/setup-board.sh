@@ -33,9 +33,18 @@ step "Preflight"
 info "arch:   $(uname -m)"
 info "kernel: $(uname -r)"
 
-for c in git curl; do
-  command -v "$c" >/dev/null 2>&1 || die "missing '$c' - install it: sudo apt install -y $c"
-done
+command -v git >/dev/null 2>&1 || die "missing 'git' - install it: sudo apt install -y git"
+
+# The RDK image ships wget but not curl, and apt can be locked by a stuck
+# PackageKit session, so don't hard-require curl. Either fetcher works.
+if command -v curl >/dev/null 2>&1; then
+  FETCH="curl -LsSf"
+elif command -v wget >/dev/null 2>&1; then
+  FETCH="wget -qO-"
+else
+  die "need curl or wget to fetch the uv installer"
+fi
+info "fetcher: ${FETCH%% *}"
 
 free_gb=$(df -PBG "$HOME" | awk 'NR==2 {gsub(/G/,"",$4); print $4}')
 info "free on \$HOME: ${free_gb}G"
@@ -45,8 +54,8 @@ info "free on \$HOME: ${free_gb}G"
 # --------------------------------------------------------------------- uv --
 step "uv"
 if ! command -v uv >/dev/null 2>&1; then
-  info "installing uv..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  info "installing uv via ${FETCH%% *}..."
+  $FETCH https://astral.sh/uv/install.sh | sh
   export PATH="$HOME/.local/bin:$PATH"
 fi
 command -v uv >/dev/null 2>&1 || die "uv not on PATH - add \$HOME/.local/bin to PATH and re-run"
