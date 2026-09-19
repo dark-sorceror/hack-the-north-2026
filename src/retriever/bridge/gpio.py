@@ -35,6 +35,12 @@ def _gpiozero() -> Any:
 class EstopButton:
     """An e-stop switch between a GPIO pin and GND, with the internal pull-up.
 
+    Pass an instance as BridgeServer(estop_input=...). The server polls it
+    every tick; while it returns True the bridge latches its e-stop, exactly
+    like an `estop` message. Releasing the button clears nothing — clearing
+    stays an explicit clear_estop from the laptop, and is refused while the
+    button is still pressed.
+
     normally_closed=True (recommended): the contacts are closed at rest, so the
     pin reads LOW; pressing opens them and the pull-up takes the pin HIGH. A
     cut wire, a pulled connector or a dead switch also reads HIGH, i.e. as a

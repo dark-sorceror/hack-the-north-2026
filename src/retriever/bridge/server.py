@@ -6,7 +6,10 @@ dropped, or the socket is half-open and will never error. The motion deadman cat
 laptop that is alive but whose control loop is not (an exception, a slow LLM call):
 heartbeats keep the link up but never keep an old velocity alive. The estop is explicit
 and latching, and survives reconnects, so a laptop that restarts cannot drive on where it
-left off. The core starts tripped: nothing moves until a client proves it is alive.
+left off. A physical button (`estop_input`, see bridge/gpio.py) latches it too, from the
+tick loop, so it works with no laptop connected; releasing the button clears nothing, and
+clear_estop is refused while it is still pressed. The core starts tripped: nothing moves
+until a client proves it is alive.
 
 All of it is in `BridgeCore`, which has no sockets and no clock (every method takes `now`),
 so the safety logic is tested exactly and instantly. `BridgeServer` is the thin asyncio
@@ -94,6 +97,7 @@ class BridgeCore:
         timeout_s: float = 0.3,
         motion_timeout_s: float = 0.5,
         max_wheel_mps: float = 0.8,
+        estop_input: Callable[[], bool] | None = None,
     ) -> None:
         for name, value in (
             ("timeout_s", timeout_s),
@@ -105,6 +109,7 @@ class BridgeCore:
         if not isinstance(driver, HardwareDriver):
             raise TypeError(f"{type(driver).__name__} does not implement HardwareDriver")
         self.driver = driver
+        self.estop_input = estop_input  # True while a physical e-stop is pressed
         self.geo = geo
         self.timeout_s = timeout_s
         self.motion_timeout_s = motion_timeout_s
@@ -151,6 +156,8 @@ class BridgeCore:
         if isinstance(msg, Estop):
             self.trigger_estop(msg.reason or "estop sent by the laptop", now)
         elif isinstance(msg, ClearEstop):
+            if self.poll_estop_input(now):
+                return "can't clear the e-stop: the physical e-stop button is still pressed"
             self._clear_estop()
         return None  # a Heartbeat only feeds the watchdog
 
@@ -167,6 +174,20 @@ class BridgeCore:
             logger.warning("ESTOP latched: %s", self.estop_reason)
         self._halt(now)
 
+    def poll_estop_input(self, now: float) -> bool:
+        """Read the physical e-stop; True while it is pressed. A press latches
+        exactly like an `estop` message, once. An input that cannot be read
+        counts as pressed: a safety input fails towards stopped."""
+        if self.estop_input is None:
+            return False
+        try:
+            pressed, reason = bool(self.estop_input()), "physical e-stop pressed"
+        except Exception as exc:
+            pressed, reason = True, f"physical e-stop unreadable: {exc}"
+        if pressed and not self.estop:
+            self.trigger_estop(reason, now)
+        return pressed
+
     def wheel_speeds(self, vx: float, wz: float) -> tuple[float, float]:
         """Rim speeds for (vx, wz); if either exceeds the limit, both scale by one factor.
 
@@ -182,7 +203,12 @@ class BridgeCore:
         return left * scale, right * scale
 
     def tick(self, now: float) -> None:
-        """Run the stops that time passing triggers. Call at the state rate."""
+        """Run the stops that time passing triggers. Call at the state rate.
+
+        Enforces the physical e-stop, the watchdog and the motion deadman — whether or
+        not a laptop is connected.
+        """
+        self.poll_estop_input(now)
         if not self.watchdog_tripped and now - self._last_heard_at >= self.timeout_s:
             self.watchdog_tripped = True
             logger.warning(
@@ -228,6 +254,7 @@ class BridgeCore:
 
     def _apply(self, act: Act, now: float) -> str | None:
         """The one place an act's commands reach the hardware."""
+        self.poll_estop_input(now)  # a press since the last tick beats this act
         if self.estop:
             return f"estop is latched ({self.estop_reason}); send clear_estop before driving"
         left, right = self.wheel_speeds(act.base_vx, act.base_wz)
@@ -301,7 +328,11 @@ class BridgeServer:
         state_hz: float = 50.0,
         max_wheel_mps: float = 0.8,
         clock: Callable[[], float] = time.monotonic,
+        estop_input: Callable[[], bool] | None = None,
     ) -> None:
+        """estop_input: polled every tick (so at state_hz) and before every act;
+        return True while a physical e-stop is pressed. Called on the loop
+        thread, so it must be a quick pin read — see bridge/gpio.EstopButton."""
         if not (math.isfinite(state_hz) and state_hz > 0.0):
             raise ValueError(f"state_hz must be positive and finite, got {state_hz!r}")
         self._host = host
@@ -315,6 +346,7 @@ class BridgeServer:
             timeout_s=timeout_ms / 1000.0,
             motion_timeout_s=motion_timeout_ms / 1000.0,
             max_wheel_mps=max_wheel_mps,
+            estop_input=estop_input,
         )
         self._server: asyncio.Server | None = None
         self._ticks: asyncio.Task[None] | None = None
