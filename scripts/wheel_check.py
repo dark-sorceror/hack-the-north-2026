@@ -12,8 +12,8 @@ Everything else spins motors and needs --yes. Speeds are capped at 60 rpm
 unless --fast (and at 330 rpm, the protocol limit, always). Every motor this
 tool drove is BRAKED on exit, on error, on Ctrl-C and on SIGTERM.
 
-+RPM means "robot forward": motors in --flipped-ids (default 3,4, the
-teammate's mirror-mounted pair) get -RPM on the wire. `sides` checks exactly
++RPM means "robot forward": motors in --flipped-ids (default 1,2, the
+robot's mirror-mounted pair, measured) get -RPM on the wire. `sides` checks exactly
 the mapping the bridge uses (DDSM115Driver) and prints the flags to pass.
 
 Port: --port, else $DDSM115_PORT, else the one WCH (USB VID 1a86) adapter.
@@ -39,6 +39,7 @@ from retriever.bridge.drivers import (  # noqa: E402
     DDSM115_COUNTS_PER_REV,
     DDSM115_MAX_RPM,
     DDSM115_MODES,
+    DDSM115_POSITION_SIGN,
     PYSERIAL_MISSING,
     WCH_USB_VID,
     DDSM115Bus,
@@ -64,8 +65,8 @@ def main(argv: list[str] | None = None, *, open_bus: Callable[..., Any] | None =
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--port", help="the USB-RS485 adapter (default: $DDSM115_PORT, else "
                         "the one WCH adapter)")
-    common.add_argument("--flipped-ids", default="3,4",
-                        help="mirror-mounted motors, which get -rpm (default 3,4)")
+    common.add_argument("--flipped-ids", default="1,2",
+                        help="mirror-mounted motors, which get -rpm (default 1,2, measured)")
     common.add_argument("--counts-per-rev", type=int, default=DDSM115_COUNTS_PER_REV,
                         help=f"counts per wheel turn (default {DDSM115_COUNTS_PER_REV})")
     common.add_argument("--reply-timeout-ms", type=float, default=10.0,
@@ -447,7 +448,7 @@ def cmd_rev(bus: Any, args: argparse.Namespace, flipped: frozenset[int], touched
                     "Run again with --counts-per-rev 65536, and give the bridge the value "
                     "that passes as --wheel-counts-per-rev.")
                 return 1
-            step = sign * unwrap_ticks(p, last, cpr)
+            step = sign * DDSM115_POSITION_SIGN * unwrap_ticks(p, last, cpr)
             if step < -wrap_jump:
                 guess = 1 << highest.bit_length()    # encoders count in powers of two
                 say(f"\nthe position wrapped after about {highest + 1} counts, not {cpr}: "
@@ -463,7 +464,8 @@ def cmd_rev(bus: Any, args: argparse.Namespace, flipped: frozenset[int], touched
     sleep(0.3)
     r, why = bus.transact(mid, dd.drive(mid, 0, brake=True))
     if r is not None:
-        total += sign * unwrap_ticks(position(r), last, cpr)     # the braking overshoot
+        total += (sign * DDSM115_POSITION_SIGN
+                  * unwrap_ticks(position(r), last, cpr))     # the braking overshoot
     elapsed = t_prev - t0
     say(f"\nmoved {total:+d} counts in {elapsed:.1f} s; the motor's rpm feedback adds up to "
         f"{revs_by_rpm:.2f} revolutions")

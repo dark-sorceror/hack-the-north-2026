@@ -33,6 +33,7 @@ from retriever.bridge import ddsm115 as dd  # noqa: E402
 from retriever.bridge import drivers  # noqa: E402
 from retriever.bridge.drivers import (  # noqa: E402
     DDSM115_COUNTS_PER_REV,
+    ROBOT_FLIPPED_IDS,
     CompositeDriver,
     DDSM115Bus,
     DDSM115Driver,
@@ -107,7 +108,7 @@ class FakeRS485:
                 m.frac += m.rpm_cmd / 60.0 * dt * self.cpr_raw
                 whole = math.trunc(m.frac)
                 m.frac -= whole
-                m.pos = (m.pos + whole) % self.cpr_raw
+                m.pos = (m.pos - whole) % self.cpr_raw    # counts DOWN at +rpm, as measured
 
     def reset_input_buffer(self):
         self._rx = b""
@@ -159,11 +160,13 @@ class FakeRS485:
         return self.writes[mark:]
 
 
-def roll(ser, counts, ids=(1, 2, 3, 4), flipped=(3, 4)):
-    """Turn the named motors `counts` in the ROBOT-FORWARD direction."""
+def roll(ser, counts, ids=(1, 2, 3, 4), flipped=ROBOT_FLIPPED_IDS):
+    """Turn the named motors `counts` in the ROBOT-FORWARD direction. A motor
+    that isn't flipped drives the robot forward at +rpm, and its position
+    counter runs DOWN at +rpm (DDSM115_POSITION_SIGN, measured)."""
     for mid in ids:
         m = ser.motors[mid]
-        m.pos = (m.pos + (-counts if mid in flipped else counts)) % ser.cpr_raw
+        m.pos = (m.pos + (counts if mid in flipped else -counts)) % ser.cpr_raw
 
 
 class Clock:
@@ -365,22 +368,22 @@ class TestDriving(unittest.TestCase):
     def test_forward_is_plus_rpm_and_minus_on_the_mirrored_side(self):
         v = rpm_to_mps(30, 0.05)
         self.drv.set_wheels(v, v)
-        self.assertEqual(self.last(1), ("drive", 30, 0, False))
-        self.assertEqual(self.last(2), ("drive", 30, 0, False))
-        self.assertEqual(self.last(3), ("drive", -30, 0, False))
-        self.assertEqual(self.last(4), ("drive", -30, 0, False))
+        self.assertEqual(self.last(1), ("drive", -30, 0, False))    # 1, 2: mirror-mounted
+        self.assertEqual(self.last(2), ("drive", -30, 0, False))
+        self.assertEqual(self.last(3), ("drive", 30, 0, False))
+        self.assertEqual(self.last(4), ("drive", 30, 0, False))
 
     def test_turn_left_in_place(self):
         v = rpm_to_mps(20, 0.05)
         self.drv.set_wheels(-v, v)          # +wz: left side back, right side forward
-        self.assertEqual([self.last(i)[1] for i in (1, 2, 3, 4)], [-20, -20, -20, -20])
+        self.assertEqual([self.last(i)[1] for i in (1, 2, 3, 4)], [20, 20, 20, 20])
 
     def test_rpm_is_rounded_and_clamped_to_330(self):
         self.drv.set_wheels(rpm_to_mps(12.6, 0.05), 10.0)
-        self.assertEqual(self.last(1)[1], 13)
-        self.assertEqual(self.last(3)[1], -330)
+        self.assertEqual(self.last(1)[1], -13)
+        self.assertEqual(self.last(3)[1], 330)
         self.drv.set_wheels(-10.0, 0.0)
-        self.assertEqual(self.last(1)[1], -330)
+        self.assertEqual(self.last(1)[1], 330)
 
     def test_one_frame_per_motor_sides_interleaved(self):
         self.drv.set_wheels(0.1, 0.1)
@@ -476,7 +479,7 @@ class TestOdometry(unittest.TestCase):
         drv, ser, clock = make(geo=TankGeometry(wheel_radius_m=0.05))
         drv.set_wheels(rpm_to_mps(25, 0.05), rpm_to_mps(25, 0.05))
         read(drv, clock)
-        self.assertEqual(ser.motors[1].drive_frames()[-1], ("drive", 25, 0, False))
+        self.assertEqual(ser.motors[1].drive_frames()[-1], ("drive", -25, 0, False))
         drv.stop()
         read(drv, clock)
         self.assertEqual(ser.motors[1].drive_frames()[-1], ("drive", 0, 0, True))
@@ -714,7 +717,7 @@ class TestBehindTheBridge(unittest.TestCase):
         v = rpm_to_mps(30, 0.05)
         self.assertIsNone(core.handle(Act(seq=1, base_vx=v), 0.01))
         self.assertEqual([ser.motors[i].drive_frames()[-1][1] for i in (1, 2, 3, 4)],
-                         [30, 30, -30, -30])
+                         [-30, -30, 30, 30])
         clock.t += 0.02
         state = core.snapshot(0.02)
         self.assertIsInstance(state.left_ticks, int)
@@ -819,30 +822,30 @@ class TestWheelCheck(unittest.TestCase):
         self.assertEqual(self.ser.writes, [])
 
     def test_spin_defaults_to_20_rpm_for_2_s_then_brakes(self):
-        code, out = self.run_check("spin", "1", "--yes")
+        code, out = self.run_check("spin", "3", "--yes")
         self.assertEqual(code, 0, out)
-        speeds = self.drives(1)
+        speeds = self.drives(3)
         self.assertEqual(set(speeds), {20})
         self.assertAlmostEqual(len(speeds) * self.mod.STEP_S, 2.0, delta=0.1)
-        self.assert_braked(1)
-        self.assertEqual(self.drives(2), [])                # nothing else moved
-        self.assertIn("motor 1: braked", out)
+        self.assert_braked(3)
+        self.assertEqual(self.drives(4), [])                # nothing else moved
+        self.assertIn("motor 3: braked", out)
 
     def test_spin_caps_rpm_unless_fast_and_330_always(self):
-        for argv, want in ((("spin", "1", "200", "--yes"), 60),
-                           (("spin", "1", "-200", "--yes"), -60),
-                           (("spin", "1", "200", "--yes", "--fast"), 200),
-                           (("spin", "1", "900", "--yes", "--fast"), 330)):
+        for argv, want in ((("spin", "3", "200", "--yes"), 60),
+                           (("spin", "3", "-200", "--yes"), -60),
+                           (("spin", "3", "200", "--yes", "--fast"), 200),
+                           (("spin", "3", "900", "--yes", "--fast"), 330)):
             with self.subTest(argv=argv):
-                self.ser.motors[1].frames.clear()
+                self.ser.motors[3].frames.clear()
                 code, out = self.run_check(*argv, "--seconds", "0.1")
                 self.assertEqual(code, 0, out)
-                self.assertEqual(set(self.drives(1)), {want})
+                self.assertEqual(set(self.drives(3)), {want})
 
     def test_spin_applies_the_mirror_flip(self):
-        code, _ = self.run_check("spin", "3", "25", "--yes", "--seconds", "0.1")
+        code, _ = self.run_check("spin", "1", "25", "--yes", "--seconds", "0.1")
         self.assertEqual(code, 0)
-        self.assertEqual(set(self.drives(3)), {-25})
+        self.assertEqual(set(self.drives(1)), {-25})
 
     def test_ctrl_c_mid_spin_still_brakes(self):
         calls = [0]
@@ -870,12 +873,14 @@ class TestWheelCheck(unittest.TestCase):
         code, out = self.run_check("sides", "--yes", answers=["", "l", "y", "", "r", "y"])
         self.assertEqual(code, 0, out)
         self.assertIn("CONFIRMED. Bridge flags", out)
-        self.assertIn("--left-ids 1,2 --right-ids 3,4 --wheel-flipped-ids 3,4", out)
+        self.assertIn("--left-ids 1,2 --right-ids 3,4 --wheel-flipped-ids 1,2", out)
         self.assert_braked(1, 2, 3, 4)
 
     def test_sides_catches_swapped_ids_and_a_backwards_side(self):
-        # the "left" motors turned the right wheels, and the "right" ones went backwards
-        code, out = self.run_check("sides", "--yes", answers=["", "r", "y", "", "l", "n"])
+        # the "left" motors turned the right wheels, and the "right" ones went backwards;
+        # starting from --flipped-ids 3,4 that flips 3,4 back: an EMPTY flipped set
+        code, out = self.run_check("sides", "--yes", "--flipped-ids", "3,4",
+                                   answers=["", "r", "y", "", "l", "n"])
         self.assertEqual(code, 1, out)
         self.assertIn("SWAPPED", out)
         self.assertIn("motors 3,4: BACKWARDS", out)
@@ -890,9 +895,9 @@ class TestWheelCheck(unittest.TestCase):
         self.assert_braked(1)
 
     def test_rev_on_a_flipped_motor_counts_forward_too(self):
-        code, out = self.run_check("rev", "4", "--yes", answers=["", "y"])
+        code, out = self.run_check("rev", "2", "--yes", answers=["", "y"])
         self.assertEqual(code, 0, out)
-        self.assertEqual(set(self.drives(4)) - {0}, {-10})
+        self.assertEqual(set(self.drives(2)) - {0}, {-10})
 
     def test_rev_spots_a_bigger_position_range(self):
         self.ser.cpr_raw = 65536

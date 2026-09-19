@@ -62,8 +62,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--left-ids", default="1,2", help="real: left-side DDSM115 motor IDs")
     parser.add_argument("--right-ids", default="3,4", help="real: right-side DDSM115 motor IDs")
     parser.add_argument(
-        "--wheel-flipped-ids", default="3,4",
-        help="real: mirror-mounted motors, which get -rpm (the teammate's 3,4)")
+        "--wheel-flipped-ids", default="1,2",
+        help="real: mirror-mounted motors, which get -rpm (measured on the robot: 1,2; "
+             "the teammate's 3,4 drove it back-end first)")
     parser.add_argument(
         "--wheel-counts-per-rev", type=int, default=DDSM115_COUNTS_PER_REV,
         help="real: DDSM115 position counts per wheel turn (wheel_check.py rev)")
