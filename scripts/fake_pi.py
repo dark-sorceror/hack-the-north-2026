@@ -33,7 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """The command line; defaults are the robot's own numbers."""
     defaults = TankGeometry()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--host", default="0.0.0.0", help='address to listen on ("" = all)')
+    parser.add_argument("--host", default="", help='address to listen on ("" = all)')
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="0 picks a free port")
     parser.add_argument("--driver", choices=("fake", "real"), default="fake")
     parser.add_argument("--wheel-port", default="/dev/ttyUSB0")

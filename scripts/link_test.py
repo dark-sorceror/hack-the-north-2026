@@ -79,6 +79,8 @@ def main() -> int:
     threading.Thread(target=writer, daemon=True).start()
 
     buf, last_arrival, last_tripped, acked = b"", None, None, 0
+    silent_seconds = 0          # whole seconds with no data at all: outages, not jitter
+    closed_early = False
     t_end = time.monotonic() + args.seconds
     print(f"  holding a zero-velocity link to {args.target} for {args.seconds:.0f} s ...")
     try:
@@ -86,9 +88,11 @@ def main() -> int:
             try:
                 chunk = sock.recv(65536)
             except socket.timeout:
+                silent_seconds += 1
                 print("  !! no data for 1 s")
                 continue
             if not chunk:
+                closed_early = True
                 print("  !! the Pi closed the connection")
                 break
             buf += chunk
@@ -118,6 +122,10 @@ def main() -> int:
         stop.set()
         sock.close()
 
+    # Gaps are measured BETWEEN messages, so a link that dies near the end of
+    # the run would otherwise never show up in them. Count the tail too.
+    tail = time.monotonic() - last_arrival if last_arrival is not None else float("inf")
+
     ms = lambda x: f"{x * 1000:6.1f} ms"
     print(f"\n  state messages  {len(gaps) + 1}")
     print(f"  round trip      p50 {ms(pct(rtts, 50))}   p95 {ms(pct(rtts, 95))}   "
@@ -125,10 +133,16 @@ def main() -> int:
     print(f"  state gaps      p50 {ms(pct(gaps, 50))}   p95 {ms(pct(gaps, 95))}   "
           f"p99 {ms(pct(gaps, 99))}   max {ms(max(gaps) if gaps else float('nan'))}")
     print(f"  watchdog trips  {trips}")
+    print(f"  outages         {silent_seconds} s with no data at all"
+          f"{', connection closed by the Pi' if closed_early else ''}; final silence {tail * 1000:.0f} ms")
 
     wd = args.watchdog_ms / 1000
-    worst = max(max(gaps, default=0), max(rtts, default=0))
+    worst = max(max(gaps, default=0), max(rtts, default=0), tail)
     print()
+    if silent_seconds or closed_early or tail > wd:
+        print("  VERDICT: the link went down during the run -- that is an outage, not")
+        print("  jitter, and no watchdog setting fixes it. Run scripts/pi_doctor.sh.")
+        return 1
     if trips:
         print(f"  VERDICT: the watchdog tripped {trips}x on this network. Either fix the")
         print(f"  link (5 GHz, dedicated router, closer) or raise the Pi's timeout above")
