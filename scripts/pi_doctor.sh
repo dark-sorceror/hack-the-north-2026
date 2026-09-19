@@ -564,7 +564,7 @@ doctor_main() {
           bstate=ok
           _say ok "bridge answers on $fam [$a]:$port (idle, ready for a laptop)"
           ;;
-        *busy*)
+        *'another client'*)
           bstate=ok
           _say ok "bridge answers on $fam [$a]:$port but another laptop holds it (busy)"
           ;;
