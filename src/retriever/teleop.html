@@ -81,7 +81,9 @@
     <div class="note">Hold <b>W A S D</b> or arrows to drive; let go to stop.
       <b>1 2 3</b> speed · <b>space</b> stop now · <b>Esc</b> e-stop (latched on the Pi).
       Leaving this tab stops the robot. Grid: 0.5 m. Trail = odometry.
-      Click-to-go aims at where the robot <i>believes</i> that spot is.</div>
+      Click-to-go aims at where the robot <i>believes</i> that spot is.
+      Map: black = seen solid, white = seen clear, red tint = too close for the robot's centre,
+      purple line = its planned route.</div>
   </aside>
 </main>
 <script>
@@ -155,6 +157,33 @@ $('resetbtn').onclick = () => post('/reset');
 // ---- the view: follows the robot, world x (start heading) points up
 const cv = $('cv'), cx = cv.getContext('2d');
 let view = null, autoErr = '';
+// ---- the map: deflated bytes, one per 5 cm cell, decoded once per version
+let mapImg = null, mapMeta = null, mapBusy = false;
+async function loadMap(m) {
+  if (!m || mapBusy || (mapMeta && mapMeta.v === m.v)) return;
+  mapBusy = true;
+  try {
+    const bin = Uint8Array.from(atob(m.data), c => c.charCodeAt(0));
+    const cells = new Uint8Array(await new Response(
+      new Blob([bin]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+    // screen-aligned: image column = y (left is +y), image row = x (up is +x)
+    const img = new ImageData(m.h, m.w), px = img.data;
+    const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+    const COL = {1: dark ? [60, 66, 76, 150] : [255, 255, 255, 190],
+                 2: dark ? [233, 235, 238, 255] : [20, 23, 28, 255],
+                 3: dark ? [232, 117, 106, 60] : [161, 27, 27, 40]};
+    for (let iy = 0; iy < m.h; iy++) for (let ix = 0; ix < m.w; ix++) {
+      const col = COL[cells[iy * m.w + ix]];
+      if (!col) continue;
+      const k = ((m.w - 1 - ix) * m.h + (m.h - 1 - iy)) * 4;
+      px[k] = col[0]; px[k + 1] = col[1]; px[k + 2] = col[2]; px[k + 3] = col[3];
+    }
+    const off = document.createElement('canvas'); off.width = m.h; off.height = m.w;
+    off.getContext('2d').putImageData(img, 0, 0);
+    mapImg = off; mapMeta = m;
+  } catch (e) { /* an old browser without DecompressionStream: no map, still drives */ }
+  mapBusy = false;
+}
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 function draw() {
   const dpr = devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
@@ -165,6 +194,12 @@ function draw() {
   const [rx, ry, th] = snap.pose, S = Math.min(W, H) / 6;          // 6 m across
   const sx = (x, y) => W / 2 - (y - ry) * S, sy = (x, y) => H / 2 - (x - rx) * S;
   view = {rx, ry, S, W, H};
+  if (snap.map === null) { mapImg = null; mapMeta = null; }
+  if (mapImg && mapMeta) {
+    const m = mapMeta, left = W / 2 - (m.y0 + m.h * m.res - ry) * S, top = H / 2 - (m.x0 + m.w * m.res - rx) * S;
+    cx.imageSmoothingEnabled = false;
+    cx.drawImage(mapImg, left, top, m.h * m.res * S, m.w * m.res * S);
+  }
   cx.strokeStyle = css('--rule'); cx.lineWidth = 1; cx.beginPath();
   for (let g = Math.floor((rx - 6) * 2) / 2; g <= rx + 6; g += 0.5) { cx.moveTo(0, sy(g, 0)); cx.lineTo(W, sy(g, 0)); }
   for (let g = Math.floor((ry - 6) * 2) / 2; g <= ry + 6; g += 0.5) { cx.moveTo(sx(0, g), 0); cx.lineTo(sx(0, g), H); }
@@ -188,6 +223,11 @@ function draw() {
   cx.stroke();
   const [nx, ny] = corner(fr + 0.12, 0), [ox, oy] = corner(0, 0);
   cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(nx, ny); cx.stroke();
+  if (snap.route && snap.route.length > 1) {          // the planned route
+    cx.strokeStyle = css('--trail'); cx.lineWidth = 3; cx.globalAlpha = 0.8; cx.beginPath();
+    snap.route.forEach(([x, y], i) => i ? cx.lineTo(sx(x, y), sy(x, y)) : cx.moveTo(sx(x, y), sy(x, y)));
+    cx.stroke(); cx.globalAlpha = 1;
+  }
   const a = snap.auto;
   if (a && a.goal) {
     const gx = sx(a.goal[0], a.goal[1]), gy = sy(a.goal[0], a.goal[1]);
@@ -257,7 +297,7 @@ function paint() {
 }
 function connect() {
   const es = new EventSource('/stream');
-  es.onmessage = e => { snap = JSON.parse(e.data); paint(); };
+  es.onmessage = e => { snap = JSON.parse(e.data); loadMap(snap.map); paint(); };
   es.onerror = () => { $('link').textContent = 'teleop server gone'; $('link').className = 'v down'; };
 }
 addEventListener('resize', draw);
