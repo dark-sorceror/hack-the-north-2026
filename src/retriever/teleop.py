@@ -26,16 +26,20 @@ of the bridge, so it cannot drive into something the bubble can see.
 
 A (turn left) always turns the nose left, reversing or not: a tank, not a car.
 
-CLICK TO GO. Click the map and the robot drives itself to that spot, through
-the goto controllers in navigation/drive.py: straight at it without a lidar,
-steering round what the lidar sees with one (navigation/avoid.py). The human
+CLICK TO GO. Click the map and the robot drives itself to that spot. With a
+lidar, every scan (driven by hand or not) goes into a map of the room
+(navigation/grid.py) and the click plans a route round what is on it and
+follows it, re-planning as it sees more (navigation/navigator.py). Without the
+map (no numpy) it steers round what the lidar sees right now (avoid.py), and
+without a lidar it drives straight at the spot. The human
 always wins: any drive key takes over, space or Esc stops it, and it only
 drives itself while the page is open (close the tab and it stops). The goal is
 in the odometry frame the page draws, so "there" means where the robot BELIEVES
 that spot is: good for a few metres, drifting with every slipped turn until the
 gyro and the map land. 1/2/3 set its top speed too.
 
-Stdlib only, like the Pi side, so it also runs on a Pi or any bare python3.
+Stdlib only, like the Pi side, so it also runs on a Pi or any bare python3;
+the map needs numpy and is simply left out without it.
 """
 
 from __future__ import annotations
@@ -53,6 +57,12 @@ from typing import Any, Callable
 from retriever.navigation.avoid import AvoidConfig, bridge_scan_source
 from retriever.navigation.drive import AvoidingGotoController, DifferentialGotoController, Limits
 from retriever.types import Action, Pose
+
+try:  # the map needs numpy; without it click-to-go falls back to avoid.py alone
+    from retriever.navigation.navigator import FollowConfig, Mapper, PathFollower
+    from retriever.navigation.pathplan import PlannerConfig
+except ImportError:  # pragma: no cover - bare python3
+    Mapper = PathFollower = FollowConfig = PlannerConfig = None  # type: ignore[assignment,misc]
 
 PAGE_PATH = Path(__file__).with_name("teleop.html")
 
@@ -240,7 +250,10 @@ class TeleopSession:
         recorder: DriveRecorder | None = None,
         clock: Callable[[], float] = time.monotonic,
         footprint: tuple[float, float, float] = (0.25, 0.25, 0.20),
+        mapping: bool = True,
     ) -> None:
+        """mapping: build a map from the lidar's scans (needs numpy), and plan
+        click-to-go routes over it. Off, or no numpy: avoid.py steering only."""
         self.connect = connect
         self.core = TeleopCore(config)
         self.recorder = recorder
@@ -255,6 +268,10 @@ class TeleopSession:
         self._seen = _Seen()
         self._trail: deque[tuple[float, float]] = deque(maxlen=3000)
         self._window: deque[tuple[float, Pose]] = deque()
+        self._history: deque[tuple[float, Pose]] = deque()   # ~2 s of (bridge t, pose)
+        self.mapper = (Mapper(planner_config=PlannerConfig.for_footprint(*footprint))
+                       if mapping and Mapper is not None else None)
+        self.map_skipped = 0                   # scans left out: taken mid-turn
         self._last_cmd = Action()
         self._threads: list[threading.Thread] = []
         self._obs: Any = None                  # the latest Observation, for click-to-go
@@ -340,9 +357,12 @@ class TeleopSession:
             limits = Limits(v_max=v, w_max=w, pos_tol=ARRIVE_M)
             lidar = (getattr(robot, "scan", None) is not None
                      or getattr(robot, "bubble", None) is not None)
-            if lidar:
+            if lidar and self.mapper is not None and self.mapper.scans:
+                ctl: Any = PathFollower(self.mapper, limits, FollowConfig(),
+                                        bubble=lambda: getattr(robot, "bubble", None))
+            elif lidar:
                 config = AvoidConfig.for_footprint(*self.footprint)
-                ctl: Any = AvoidingGotoController(bridge_scan_source(robot), limits, config)
+                ctl = AvoidingGotoController(bridge_scan_source(robot), limits, config)
             else:
                 ctl = DifferentialGotoController(limits)
             # Heading = the way it will be going: arriving needs no final turn.
@@ -424,8 +444,11 @@ class TeleopSession:
         with self._lock:
             self._trail.clear()
             self._window.clear()
+            self._history.clear()
             self._seen.odometer_m = 0.0
             self._seen.pose = Pose()
+            if self.mapper is not None:
+                self.mapper.reset()             # it was drawn in the frame just reset
 
     # -- threads ----------------------------------------------------------
 
@@ -522,6 +545,9 @@ class TeleopSession:
             self._window.append((obs.t, p))
             while len(self._window) > 2 and obs.t - self._window[0][0] > 0.3:
                 self._window.popleft()
+            self._history.append((obs.t, p))
+            while len(self._history) > 2 and obs.t - self._history[0][0] > 2.0:
+                self._history.popleft()
             t0, p0 = self._window[0]
             if obs.t - t0 > 0.05:
                 dt = obs.t - t0
@@ -529,6 +555,11 @@ class TeleopSession:
                 s.vx = (dx * math.cos(p0.theta) + dy * math.sin(p0.theta)) / dt
                 s.wz = math.remainder(p.theta - p0.theta, math.tau) / dt
             cmd = self._last_cmd
+        scan = getattr(robot, "scan", None)
+        new_scan = scan is not None and scan.t != self._seen.scan_t
+        if new_scan:
+            self._seen.scan_t = scan.t
+            self._map_scan(scan)
         if self.recorder is None:
             return
         state = getattr(robot, "state", None)
@@ -538,11 +569,45 @@ class TeleopSession:
             x=round(p.x, 4), y=round(p.y, 4), th=round(p.theta, 5),
             cvx=round(cmd.base_vx, 3), cwz=round(cmd.base_wz, 3),
             estop=bool(getattr(state, "estop", False)))
-        scan = getattr(robot, "scan", None)
-        if scan is not None and scan.t != self._seen.scan_t:
-            self._seen.scan_t = scan.t
+        if new_scan:
             self.recorder.write("scan", t=round(scan.t, 4),
                                 pts=[[round(x, 3), round(y, 3)] for x, y, *_ in scan.points])
+
+    def _pose_at(self, t: float) -> tuple[Pose, float] | None:
+        """Odometry at bridge time t, interpolated, and the turn rate then.
+        None if t is outside the ~2 s of history."""
+        with self._lock:
+            h = list(self._history)
+        if len(h) < 2 or t < h[0][0] or t > h[-1][0] + 0.1:
+            return None
+        for (t0, a), (t1, b) in zip(h, h[1:]):
+            if t0 <= t <= t1 or (t1 == h[-1][0] and t > t1):
+                if t1 <= t0:
+                    return b, 0.0
+                s = min(1.0, (t - t0) / (t1 - t0))
+                dth = math.remainder(b.theta - a.theta, math.tau)
+                pose = Pose(a.x + s * (b.x - a.x), a.y + s * (b.y - a.y), a.theta + s * dth)
+                return pose, dth / (t1 - t0)
+        return None
+
+    def _map_scan(self, scan: Any) -> None:
+        """Put one scan in the map at the pose it was TAKEN from. A scan arrives
+        up to ~0.2 s after it was taken; at 1 rad/s that is 11 degrees of smear
+        if it went in at the current pose. Scans taken while spinning fast are
+        left out: the Pi integrates a revolution over ~85 ms."""
+        if self.mapper is None:
+            return
+        at = self._pose_at(scan.t)
+        if at is None:
+            return
+        pose, wz = at
+        if abs(wz) > 0.8 or abs(self._seen.wz) > 0.8:
+            self.map_skipped += 1
+            return
+        try:
+            self.mapper.add_scan(pose, [(x, y) for x, y, *_ in scan.points])
+        except Exception:   # a map bug must not take the observe loop (odometry) down
+            self.map_skipped += 1
 
     def _record_meta(self, robot: Any) -> None:
         if self.recorder is None:
@@ -581,6 +646,8 @@ class TeleopSession:
             }
             a = self.auto
             plan = getattr(a.ctl, "plan", None) if a is not None else None
+            route = getattr(a.ctl, "path", None) if a is not None else None
+            snap["route"] = None if not route else [[round(x, 3), round(y, 3)] for x, y in route]
             snap["auto"] = {
                 "status": "driving" if a is not None else self.auto_status,
                 "detail": self.auto_detail,
@@ -597,6 +664,10 @@ class TeleopSession:
             "state": bubble.state, "reason": bubble.reason,
             "nearest_m": bubble.nearest_m, "stop_m": bubble.stop_m}
         scan = getattr(robot, "scan", None) if robot is not None else None
+        mapper = self.mapper
+        snap["map"] = None if mapper is None else mapper.page_view()
+        snap["map_stats"] = None if mapper is None else {
+            "scans": mapper.scans, "skipped": self.map_skipped}
         snap["scan"] = None if scan is None else {
             "age_s": round(scan.age(), 2),
             "pts": [[round(x, 3), round(y, 3), int(bool(near))] for x, y, near in scan.points]}
