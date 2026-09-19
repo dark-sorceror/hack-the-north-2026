@@ -97,8 +97,19 @@ def main() -> int:
                 if args.record == "auto" else Path(args.record))
         recorder = DriveRecorder(path)
 
-    session = TeleopSession(lambda: BridgeRobot(host, bport, connect_timeout_s=2.0),
-                            config, recorder, footprint=footprint).start()
+    def connect() -> BridgeRobot:
+        try:
+            return BridgeRobot(host, bport, connect_timeout_s=2.0)
+        except ConnectionError as exc:
+            if "refused" in str(exc).lower():   # the Pi answered: nothing on the port
+                raise ConnectionError(
+                    f"the Pi at {host} is up but its bridge isn't listening on {bport}. With "
+                    "--driver real that means the wheel adapter isn't plugged in (or the "
+                    "motors are off); it starts by itself once it is. On the Pi: "
+                    "journalctl -u retriever-bridge -n 5") from None
+            raise
+
+    session = TeleopSession(connect, config, recorder, footprint=footprint).start()
     try:
         httpd = serve(session, args.listen, args.port)
     except OSError as exc:
