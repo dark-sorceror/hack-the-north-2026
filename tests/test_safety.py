@@ -19,6 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from retriever.bridge.client import BridgeRobot
 from retriever.bridge.fake_driver import FakeTankDriver
 from retriever.bridge.lidar import (
     FakeLidar,
@@ -56,6 +57,7 @@ from retriever.bridge.safety import (
     propose_mask,
 )
 from retriever.bridge.server import BridgeCore, BridgeServer, ServerThread
+from retriever.types import Action
 
 DEG = math.radians
 logging.getLogger("retriever.bridge").setLevel(logging.CRITICAL)
@@ -72,6 +74,15 @@ V1_KEYS = {
 V1_STATE = (b'{"v":1,"type":"state","seq":3,"t":1.5,"left_ticks":4095,"right_ticks":-12,'
             b'"joints":{"gripper":0.4},"gripper_load":0.7,"battery":0.9,"estop":true,'
             b'"watchdog_tripped":false}\n')
+
+
+def wait_until(pred, timeout=3.0, every=0.01):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(every)
+    return pred()
 
 
 class Clock:
@@ -515,8 +526,44 @@ class LidarServerCase(unittest.TestCase):
         self.port = self.st.start()
         self.addCleanup(self.st.stop)
 
+    def connect(self, **kw):
+        bot = BridgeRobot("127.0.0.1", self.port, **kw)
+        self.addCleanup(bot.close)
+        return bot
+
+    def drive(self, bot, vx, wz=0.0, seconds=1.0):
+        obs = bot.observe()
+        t0 = obs.t
+        while obs.t - t0 < seconds:
+            bot.act(Action(base_vx=vx, base_wz=wz))
+            obs = bot.observe()
+        return obs
+
 
 class TestServerWithLidar(LidarServerCase):
+    def test_driving_toward_a_fake_wall_stops_short(self):
+        self.serve(wall_x=1.0)
+        bot = self.connect(heartbeat_hz=20.0)
+        obs = self.drive(bot, 0.3, seconds=5.0)
+        gap = 1.0 - (obs.base.x + 0.25)
+        self.assertGreater(gap, 0.02, "touched the wall")
+        self.assertLess(gap, 0.10, "stopped far short: creep did not work")
+        self.assertEqual(self.st.call(lambda: self.drv.wheel_speeds), (0.0, 0.0))
+        self.assertTrue(wait_until(
+            lambda: bot.bubble is not None and bot.bubble.state == "blocked"))
+        self.assertIn("ahead", bot.bubble.reason)
+        self.assertAlmostEqual(bot.bubble.nearest_m, gap, delta=0.02)
+        # the scan arrived too, and shows the wall ahead in the base frame
+        self.assertTrue(wait_until(lambda: bot.scan is not None))
+        ahead = [x for x, y, _ in bot.scan.points if abs(y) < 0.05 and x > 0]
+        self.assertAlmostEqual(min(ahead), 1.0 - obs.base.x, delta=0.03)
+        self.assertTrue(any(near for x, y, near in bot.scan.points if abs(y) < 0.05 and x > 0))
+        # backing away works, and so does turning in place
+        back = self.drive(bot, -0.2, seconds=0.5)
+        self.assertLess(back.base.x, obs.base.x - 0.05)
+        turned = self.drive(bot, 0.0, 1.0, seconds=0.5)
+        self.assertGreater(abs(turned.base.theta), 0.2)
+
     def test_old_client_gets_exactly_the_v1_stream(self):
         self.serve()
         c = Raw(self.port)
@@ -533,6 +580,39 @@ class TestServerWithLidar(LidarServerCase):
         self.assertIn("state", seen)
         # and the bubble still guards it: its drive is filtered all the same
         self.assertIsNotNone(self.st.call(lambda: self.server.core.decision))
+
+    def test_client_that_does_not_subscribe_works_unchanged(self):
+        self.serve()
+        bot = self.connect(subscribe=False)
+        obs = self.drive(bot, 0.2, seconds=0.5)
+        self.assertGreater(obs.base.x, 0.05)
+        time.sleep(0.2)
+        self.assertIsNone(bot.bubble)
+        self.assertIsNone(bot.scan)
+        self.assertIsNone(bot.lidar_view())
+
+    def test_no_lidar_server_sends_v1_even_to_a_subscriber(self):
+        self.serve(lidar=False)
+        bot = self.connect()
+        self.drive(bot, 0.2, seconds=0.3)
+        self.assertIsNone(bot.bubble)
+        self.assertIsNone(bot.scan)
+        self.assertIsNone(bot.last_error)
+        core = self.server.core
+        state = self.st.call(lambda: core.snapshot(self.server._clock(), extended=True))
+        self.assertEqual(set(json.loads(encode(state))), V1_KEYS["state"])
+
+    def test_new_client_on_an_old_pi_just_has_no_lidar(self):
+        """An old Pi rejects `subscribe` as an unknown message and says so."""
+        old = tuple(m for m in CLIENT_MESSAGES if m is not Subscribe)
+        with mock.patch("retriever.bridge.server.CLIENT_MESSAGES", old):
+            self.serve(lidar=False)
+            bot = self.connect()
+            self.assertTrue(wait_until(lambda: bot.lidar_supported is False))
+            obs = self.drive(bot, 0.2, seconds=0.4)
+        self.assertGreater(obs.base.x, 0.03)
+        self.assertIsNone(bot.last_error)
+        self.assertIsNone(bot.bubble)
 
     def test_server_close_closes_the_lidar(self):
         self.serve()
