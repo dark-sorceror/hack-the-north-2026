@@ -28,7 +28,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 . "$HERE/pi_doctor.sh"
 
 REMOTE_DIR=retriever                  # relative to the Pi user's home
-TEST_MODULES="tests.test_bridge tests.test_tank_backend tests.test_drivers tests.test_odometry"
+TEST_MODULES="tests.test_protocol tests.test_bridge tests.test_tank_backend tests.test_drivers tests.test_odometry"
 SYNC_DIRS="src scripts pi tests"
 
 usage() {
