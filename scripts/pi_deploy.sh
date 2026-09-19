@@ -28,7 +28,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 . "$HERE/pi_doctor.sh"
 
 REMOTE_DIR=retriever                  # relative to the Pi user's home
-TEST_MODULES="tests.test_protocol tests.test_bridge tests.test_tank_backend tests.test_drivers tests.test_odometry"
+TEST_MODULES="tests.test_protocol tests.test_bridge tests.test_tank_backend tests.test_gpio tests.test_drivers tests.test_odometry"
 SYNC_DIRS="src scripts pi tests"
 
 usage() {
@@ -55,7 +55,7 @@ Deploy the bridge to the Raspberry Pi and check it, in one command:
   --no-preflight     skip pi_doctor.sh (it takes a few seconds when all is well)
   --no-sync          do not copy code; use what is already on the Pi (e.g. just
                      re-measure: --no-sync --skip-tests --link-test 30)
-  -- ARGS...         passed to scripts/fake_pi.py, e.g. -- --timeout-ms 500
+  -- ARGS...         passed to scripts/fake_pi.py, e.g. -- --estop-pin 17
 
   e.g.  scripts/pi_deploy.sh --run --link-test 30
         scripts/pi_deploy.sh --stop
