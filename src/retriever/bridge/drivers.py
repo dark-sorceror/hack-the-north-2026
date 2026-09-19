@@ -810,12 +810,38 @@ class CompositeDriver:
         if first_error is not None:
             raise first_error
 
+    def close(self) -> None:
+        """Release the hardware on shutdown. The base's close() brakes before
+        it lets go of its port; a part with no close() is left as it is. The
+        vacuum is its owner's to close."""
+        for part in [self._base, *self._arms.values()]:
+            close = getattr(part, "close", None)
+            if close is None:
+                continue
+            try:
+                close()
+            except Exception as exc:
+                logger.warning("closing %s: %s", type(part).__name__, exc)
+
 
 def build_real_driver(
-    wheel_port: str, arm_port: str | None = None, geo: TankGeometry = TankGeometry()
+    wheel_port: str | None,
+    geo: TankGeometry = TankGeometry(),
+    vacuum: VacuumDriver | None = None,
+    *,
+    left_ids: Iterable[int] = (1, 2),
+    right_ids: Iterable[int] = (3, 4),
+    flipped_ids: Iterable[int] | None = None,
+    wheel_counts_per_rev: int = DDSM115_COUNTS_PER_REV,
+    wheel_reply_timeout_s: float = 0.010,
 ) -> CompositeDriver:
-    """The robot's real hardware; not written yet, so this always raises."""
-    raise NotImplementedError(
-        f"the DDSM115 wheel driver (for {wheel_port}) and the SO-101 arm driver are not "
-        "written yet; run the bridge with --driver fake"
-    )
+    """What scripts/fake_pi.py --driver real constructs.
+
+    wheel_port None: $DDSM115_PORT, else the one WCH USB adapter
+    (find_wheel_port refuses to guess between two). left_ids, right_ids and
+    flipped_ids (None: the teammate's {3, 4}) are unverified until
+    `scripts/wheel_check.py sides` says otherwise."""
+    base = DDSM115Driver(wheel_port, geo=geo, left_ids=left_ids, right_ids=right_ids,
+                         flipped_ids=flipped_ids, counts_per_rev=wheel_counts_per_rev,
+                         reply_timeout_s=wheel_reply_timeout_s)
+    return CompositeDriver(base, vacuum=vacuum)

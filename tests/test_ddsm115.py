@@ -24,16 +24,19 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from retriever.bridge import ddsm115 as dd  # noqa: E402
+from retriever.bridge import drivers  # noqa: E402
 from retriever.bridge.drivers import (  # noqa: E402
     DDSM115_COUNTS_PER_REV,
     CompositeDriver,
     DDSM115Bus,
     DDSM115Driver,
+    build_real_driver,
     find_wheel_port,
     mps_to_rpm,
     parse_id_list,
@@ -728,6 +731,20 @@ class TestBehindTheBridge(unittest.TestCase):
         self.assertIn("right side: no motor answering", refused)
         for mid in (1, 2):
             self.assertEqual(ser.motors[mid].drive_frames()[-1], ("drive", 0, 0, True))
+
+
+class TestBuildRealDriver(unittest.TestCase):
+    def test_real_wheels_get_the_ids_and_the_port(self):
+        with mock.patch.object(drivers, "DDSM115Driver") as cls:
+            drv = build_real_driver(None, left_ids=(5, 6), right_ids=(7, 8),
+                                    flipped_ids=(7, 8), wheel_counts_per_rev=65536)
+        _, kwargs = cls.call_args
+        self.assertEqual(cls.call_args.args[0], None)          # auto-detect
+        self.assertEqual((kwargs["left_ids"], kwargs["right_ids"], kwargs["flipped_ids"]),
+                         ((5, 6), (7, 8), (7, 8)))
+        self.assertEqual(kwargs["counts_per_rev"], 65536)
+        drv.close()                                            # frees the wheel port
+        cls.return_value.close.assert_called_once()
 
 
 if __name__ == "__main__":

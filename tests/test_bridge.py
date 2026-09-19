@@ -835,15 +835,17 @@ class FakePiScriptTest(unittest.TestCase):
         self.assertEqual(proc.wait(timeout=10), 0)
         self.assertIn("motors stopped", proc.stderr.read())
 
-    def test_the_real_driver_is_not_written_yet_and_says_so(self) -> None:
+    def test_the_real_driver_without_its_hardware_exits_with_directions(self) -> None:
+        port = "/dev/no-such-wheel-bus"
         out = subprocess.run(
-            [sys.executable, str(self.SCRIPT), "--driver", "real"],
+            [sys.executable, str(self.SCRIPT), "--driver", "real", "--wheel-port", port],
             capture_output=True,
             text=True,
             timeout=30,
         )
         self.assertEqual(out.returncode, 2)
-        self.assertIn("--driver fake", out.stderr)
+        # no pyserial: says it is missing; with pyserial: names the port it could not open
+        self.assertTrue("pyserial" in out.stderr or port in out.stderr, out.stderr)
 
 
 class ImportTest(unittest.TestCase):
