@@ -747,5 +747,155 @@ class TestBuildRealDriver(unittest.TestCase):
         cls.return_value.close.assert_called_once()
 
 
+# ---------------------------------------------------------------- scripts/wheel_check.py
+
+
+def load_wheel_check():
+    path = ROOT / "scripts" / "wheel_check.py"
+    spec = importlib.util.spec_from_file_location("wheel_check", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestWheelCheck(unittest.TestCase):
+    def setUp(self):
+        self.mod = load_wheel_check()
+        self.clock = Clock()
+        self.ser = FakeRS485([FakeMotor(i, pos=p) for i, p in ((1, 100), (2, 200), (3, 300),
+                                                               (4, 400))], clock=self.clock)
+        self.opened = 0
+
+    def open_bus(self, port, reply_timeout_s, say):
+        self.opened += 1
+        self.ser.closed = False                 # each run opens the port afresh
+        return DDSM115Bus(self.ser, reply_timeout_s=reply_timeout_s, port="/dev/fake")
+
+    def run_check(self, *argv, answers=(), sleep=None):
+        out = io.StringIO()
+        answers = list(answers)
+        code = self.mod.main(list(argv), open_bus=self.open_bus,
+                             sleep=sleep or self.clock.sleep, clock=self.clock, out=out,
+                             ask=lambda prompt: answers.pop(0) if answers else "")
+        return code, out.getvalue()
+
+    def drives(self, mid):
+        return [f[1] for f in self.ser.motors[mid].drive_frames() if not f[3]]
+
+    def assert_braked(self, *ids):
+        for mid in ids:
+            self.assertEqual(self.ser.motors[mid].drive_frames()[-1], ("drive", 0, 0, True))
+
+    def test_scan_is_read_only(self):
+        self.ser.motors[4].silent = True
+        self.ser.motors[2].err = 0x08
+        code, out = self.run_check("scan")
+        self.assertEqual(code, 0, out)
+        self.assertEqual({w[1] for w in self.ser.writes}, {0x74})     # queries only
+        self.assertIn("found: 1,2,3", out)
+        self.assertIn("not answering: 4", out)
+        self.assertIn("stall", out)
+
+    def test_everything_that_spins_refuses_without_yes(self):
+        for argv in (("spin", "1"), ("sides",), ("rev", "1")):
+            with self.subTest(argv=argv):
+                code, out = self.run_check(*argv)
+                self.assertEqual(code, 2)
+                self.assertIn("WHEELS OFF THE GROUND", out)
+        self.assertEqual(self.opened, 0)
+        self.assertEqual(self.ser.writes, [])
+
+    def test_spin_defaults_to_20_rpm_for_2_s_then_brakes(self):
+        code, out = self.run_check("spin", "1", "--yes")
+        self.assertEqual(code, 0, out)
+        speeds = self.drives(1)
+        self.assertEqual(set(speeds), {20})
+        self.assertAlmostEqual(len(speeds) * self.mod.STEP_S, 2.0, delta=0.1)
+        self.assert_braked(1)
+        self.assertEqual(self.drives(2), [])                # nothing else moved
+        self.assertIn("motor 1: braked", out)
+
+    def test_spin_caps_rpm_unless_fast_and_330_always(self):
+        for argv, want in ((("spin", "1", "200", "--yes"), 60),
+                           (("spin", "1", "-200", "--yes"), -60),
+                           (("spin", "1", "200", "--yes", "--fast"), 200),
+                           (("spin", "1", "900", "--yes", "--fast"), 330)):
+            with self.subTest(argv=argv):
+                self.ser.motors[1].frames.clear()
+                code, out = self.run_check(*argv, "--seconds", "0.1")
+                self.assertEqual(code, 0, out)
+                self.assertEqual(set(self.drives(1)), {want})
+
+    def test_spin_applies_the_mirror_flip(self):
+        code, _ = self.run_check("spin", "3", "25", "--yes", "--seconds", "0.1")
+        self.assertEqual(code, 0)
+        self.assertEqual(set(self.drives(3)), {-25})
+
+    def test_ctrl_c_mid_spin_still_brakes(self):
+        calls = [0]
+
+        def sleep(s):
+            calls[0] += 1
+            if calls[0] > 20:
+                raise KeyboardInterrupt
+            self.clock.sleep(s)
+
+        code, out = self.run_check("spin", "2", "--yes", "--seconds", "5", sleep=sleep)
+        self.assertEqual(code, 130)
+        self.assert_braked(2)
+        self.assertIn("motor 2: braked", out)
+        self.assertTrue(self.ser.closed)
+
+    def test_a_motor_not_in_velocity_mode_is_not_spun(self):
+        self.ser.motors[1].lock_mode = self.ser.motors[1].mode = dd.POSITION
+        code, out = self.run_check("spin", "1", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("POSITION mode", out)
+        self.assertEqual(self.ser.motors[1].drive_frames(), [])
+
+    def test_sides_confirms_the_right_setup(self):
+        code, out = self.run_check("sides", "--yes", answers=["", "l", "y", "", "r", "y"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("CONFIRMED. Bridge flags", out)
+        self.assertIn("--left-ids 1,2 --right-ids 3,4 --wheel-flipped-ids 3,4", out)
+        self.assert_braked(1, 2, 3, 4)
+
+    def test_sides_catches_swapped_ids_and_a_backwards_side(self):
+        # the "left" motors turned the right wheels, and the "right" ones went backwards
+        code, out = self.run_check("sides", "--yes", answers=["", "r", "y", "", "l", "n"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("SWAPPED", out)
+        self.assertIn("motors 3,4: BACKWARDS", out)
+        # no motor flipped any more: an empty flag value must still paste into a shell
+        self.assertIn('--left-ids 3,4 --right-ids 1,2 --wheel-flipped-ids ""', out)
+
+    def test_rev_turns_one_revolution_worth_of_counts(self):
+        code, out = self.run_check("rev", "1", "--yes", answers=["", "y"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("CONFIRMED on motor 1", out)
+        self.assertRegex(out, r"about 3\d{4} counts per revolution")
+        self.assert_braked(1)
+
+    def test_rev_on_a_flipped_motor_counts_forward_too(self):
+        code, out = self.run_check("rev", "4", "--yes", answers=["", "y"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(set(self.drives(4)) - {0}, {-10})
+
+    def test_rev_spots_a_bigger_position_range(self):
+        self.ser.cpr_raw = 65536
+        self.ser.motors[1].pos = 32000
+        code, out = self.run_check("rev", "1", "--yes", answers=[""])
+        self.assertEqual(code, 1)
+        self.assertIn("--counts-per-rev 65536", out)
+        self.assert_braked(1)
+
+    def test_rev_spots_a_smaller_position_range(self):
+        self.ser.cpr_raw = 4096
+        code, out = self.run_check("rev", "1", "--yes", answers=[""])
+        self.assertEqual(code, 1)
+        self.assertIn("counts_per_rev is probably 4096", out)
+        self.assert_braked(1)
+
+
 if __name__ == "__main__":
     unittest.main()
