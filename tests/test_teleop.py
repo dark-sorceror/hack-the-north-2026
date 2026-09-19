@@ -1,0 +1,272 @@
+"""Teleop: held keys -> ramped Actions, the deadman, and the whole chain over a
+real bridge server with the fake tank."""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import sys
+import time
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from retriever.bridge.client import BridgeRobot
+from retriever.bridge.fake_driver import FakeTankDriver
+from retriever.bridge.server import BridgeServer, ServerThread
+from retriever.teleop import (
+    DriveRecorder,
+    TeleopConfig,
+    TeleopCore,
+    TeleopSession,
+    parse_gears,
+    serve,
+)
+
+_QUIET = logging.NullHandler()
+
+
+def setUpModule():
+    # The bridge logs a warning on every stop, by design; these tests stop it a lot.
+    logging.getLogger("retriever.bridge").addHandler(_QUIET)
+
+
+def tearDownModule():
+    logging.getLogger("retriever.bridge").removeHandler(_QUIET)
+
+
+def run(core: TeleopCore, t0: float, t1: float, dt: float = 0.05):
+    t, a = t0, None
+    while t <= t1 + 1e-9:
+        a = core.step(t)
+        t += dt
+    return a
+
+
+class TestCore(unittest.TestCase):
+    def test_silent_page_means_zero(self):
+        core = TeleopCore()
+        a = run(core, 0.0, 1.0)
+        self.assertEqual((a.base_vx, a.base_wz), (0.0, 0.0))
+
+    def test_forward_ramps_up_then_holds_gear_speed(self):
+        core = TeleopCore(TeleopConfig(gears=((0.3, 1.0),), accel_mps2=1.0))
+        core.step(0.0)
+        core.command(1, 0, 0.0)
+        self.assertAlmostEqual(core.step(0.1).base_vx, 0.1)      # 1 m/s^2 for 0.1 s
+        for i in range(2, 6):
+            core.command(1, 0, i / 10)                            # the page keeps saying so
+            a = core.step(i / 10)
+        self.assertAlmostEqual(a.base_vx, 0.3)
+        self.assertEqual(a.base_wz, 0.0)
+
+    def test_page_going_quiet_stops_it(self):
+        c = TeleopConfig(gears=((0.3, 1.0),), hold_s=0.3, decel_mps2=2.0)
+        core = TeleopCore(c)
+        core.step(0.0)
+        core.command(1, 0, 0.0)
+        run(core, 0.05, 0.30)                                     # still inside hold_s: moving
+        self.assertGreater(core.vx, 0.2)
+        a = run(core, 0.35, 0.60)                                 # silent past hold_s: ramped down
+        self.assertEqual(a.base_vx, 0.0)
+        self.assertFalse(core.moving)
+
+    def test_halt_is_immediate(self):
+        core = TeleopCore()
+        core.step(0.0)
+        core.command(1, 1, 0.0)
+        run(core, 0.05, 0.25)
+        core.halt()
+        a = core.step(0.3)
+        self.assertEqual((a.base_vx, a.base_wz), (0.0, 0.0))
+
+    def test_a_turns_left_whichever_way_it_drives(self):
+        for fwd in (0, 1, -1):
+            core = TeleopCore(TeleopConfig(ang_accel=100.0, accel_mps2=100.0))
+            core.step(0.0)
+            core.command(fwd, 1, 0.0)
+            a = core.step(0.1)
+            self.assertGreater(a.base_wz, 0.0, f"fwd={fwd}")
+            self.assertEqual(math.copysign(1, a.base_vx) if fwd else 0, fwd)
+
+    def test_arcs_turn_gentler_than_spins(self):
+        c = TeleopConfig(gears=((0.3, 1.0),), arc_turn_scale=0.5)
+        core = TeleopCore(c)
+        core.command(0, 1, 0.0)
+        self.assertEqual(core.target(0.0), (0.0, 1.0))
+        core.command(1, 1, 0.0)
+        self.assertEqual(core.target(0.0), (0.3, 0.5))
+
+    def test_gear_is_clamped_and_bad_input_changes_nothing(self):
+        core = TeleopCore()
+        core.command(1, 0, 0.0, gear=99)
+        self.assertEqual(core.gear, len(core.config.gears) - 1)
+        core.command(1, 0, 0.0, gear=-3)
+        self.assertEqual(core.gear, 0)
+        core.command(5, -5, 0.0)
+        self.assertEqual((core.fwd, core.turn), (1.0, -1.0))
+        with self.assertRaises(ValueError):
+            core.command(float("nan"), 0, 0.1)
+        with self.assertRaises(ValueError):
+            core.command("fast", 0, 0.1)
+        self.assertEqual((core.fwd, core.turn), (1.0, -1.0))
+
+    def test_reversing_direction_uses_the_quick_ramp(self):
+        c = TeleopConfig(gears=((0.3, 1.0),), accel_mps2=0.5, decel_mps2=3.0)
+        core = TeleopCore(c)
+        core.vx = 0.3
+        core.step(0.0)
+        core.command(-1, 0, 0.0)
+        self.assertAlmostEqual(core.step(0.05).base_vx, 0.15)    # braking: 3 m/s^2
+
+    def test_parse_gears(self):
+        self.assertEqual(parse_gears("0.1:0.5, 0.2:0.9"), ((0.1, 0.5), (0.2, 0.9)))
+        for bad in ("", "fast", "0.1", "9:1", "0.1:-1"):
+            with self.assertRaises(ValueError, msg=bad):
+                parse_gears(bad)
+
+
+class BridgeCase(unittest.TestCase):
+    def setUp(self):
+        self.drv = FakeTankDriver()
+        self.server = BridgeServer(self.drv, "127.0.0.1", 0, timeout_ms=300,
+                                   motion_timeout_ms=500, state_hz=50.0)
+        self.st = ServerThread(self.server)
+        self.port = self.st.start()
+        self.addCleanup(self.st.stop)
+
+    def session(self, **kw):
+        s = TeleopSession(lambda: BridgeRobot("127.0.0.1", self.port), **kw).start()
+        self.addCleanup(s.close)
+        self.assertTrue(s.wait_connected(3.0), s.link_detail)
+        return s
+
+    def hold(self, s, fwd, turn, seconds, gear=1):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            s.drive(fwd, turn, gear)
+            time.sleep(0.05)
+
+    def wheels(self):
+        return self.st.call(lambda: self.drv.wheel_speeds)
+
+
+class TestSession(BridgeCase):
+    def test_holding_w_drives_forward_and_letting_go_stops(self):
+        s = self.session()
+        self.hold(s, 1, 0, 0.8)
+        snap = s.snapshot()
+        self.assertEqual(snap["link"], "up")
+        self.assertGreater(snap["cmd"][0], 0.25)
+        self.assertGreater(snap["meas"][0], 0.15)
+        time.sleep(0.8)                                  # silent past hold_s, then ramped down
+        self.assertEqual(self.wheels(), (0.0, 0.0))
+        snap = s.snapshot()
+        self.assertGreater(snap["pose"][0], 0.1)
+        self.assertLess(abs(snap["pose"][1]), 0.01)
+        self.assertGreater(snap["odometer_m"], 0.1)
+        self.assertTrue(snap["trail"])
+
+    def test_turning_left_turns_counter_clockwise(self):
+        s = self.session()
+        self.hold(s, 0, 1, 0.8)
+        time.sleep(0.4)
+        self.assertGreater(s.snapshot()["pose"][2], 0.3)
+
+    def test_estop_latches_on_the_pi_until_cleared(self):
+        s = self.session()
+        s.estop()
+        deadline = time.monotonic() + 2.0
+        while not s.snapshot()["estop"] and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(s.snapshot()["estop"])
+        self.hold(s, 1, 0, 0.4)
+        self.assertEqual(self.wheels(), (0.0, 0.0))     # the Pi ignores it
+        s.clear_estop()
+        deadline = time.monotonic() + 2.0
+        while s.snapshot()["estop"] and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(s.snapshot()["estop"])
+
+    def test_closing_stops_the_motors(self):
+        s = self.session()
+        self.hold(s, 1, 0, 0.4)
+        s.close()
+        time.sleep(0.2)
+        self.assertEqual(self.wheels(), (0.0, 0.0))
+
+    def test_records_states_and_meta(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            rec = DriveRecorder(Path(d) / "drive.jsonl")
+            s = self.session(recorder=rec)
+            self.hold(s, 1, 0, 0.3)
+            s.close()
+            lines = [json.loads(x) for x in (Path(d) / "drive.jsonl").read_text().splitlines()]
+        kinds = {x["k"] for x in lines}
+        self.assertIn("meta", kinds)
+        self.assertIn("state", kinds)
+        st = [x for x in lines if x["k"] == "state"]
+        self.assertTrue(all("lt" in x and "rt" in x for x in st))
+        self.assertGreater(max(x["cvx"] for x in st), 0.0)
+
+    def test_reconnects_after_the_link_drops(self):
+        tries = {"n": 0}
+
+        def connect():
+            tries["n"] += 1
+            if tries["n"] == 1:
+                raise ConnectionError("no route to host")
+            return BridgeRobot("127.0.0.1", self.port)
+
+        s = TeleopSession(connect).start()
+        self.addCleanup(s.close)
+        self.assertTrue(s.wait_connected(4.0))
+        robot = s.robot
+        robot.close()                                   # the link dies under it
+        deadline = time.monotonic() + 4.0
+        while (s.robot is robot or s.link != "up") and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(s.link, "up")
+        self.assertIsNot(s.robot, robot)
+
+
+class TestHttp(BridgeCase):
+    def setUp(self):
+        super().setUp()
+        self.s = self.session()
+        self.httpd = serve(self.s, "127.0.0.1", 0)
+        self.addCleanup(self.httpd.shutdown)
+        self.base = f"http://127.0.0.1:{self.httpd.server_port}"
+
+    def post(self, path, body):
+        req = urllib.request.Request(self.base + path, json.dumps(body).encode(),
+                                     {"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=2) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_page_and_state(self):
+        with urllib.request.urlopen(self.base + "/", timeout=2) as r:
+            page = r.read().decode()
+        self.assertIn("KeyW", page)
+        self.assertIn("/drive", page)
+        with urllib.request.urlopen(self.base + "/state", timeout=2) as r:
+            self.assertEqual(json.load(r)["link"], "up")
+
+    def test_drive_and_bad_input(self):
+        self.assertEqual(self.post("/drive", {"fwd": 1, "turn": 0, "gear": 0}), 204)
+        self.assertEqual(self.post("/drive", {"fwd": "fast"}), 400)
+        self.assertEqual(self.post("/nope", {}), 404)
+        self.assertEqual(self.post("/halt", {}), 204)
+
+
+if __name__ == "__main__":
+    unittest.main()
