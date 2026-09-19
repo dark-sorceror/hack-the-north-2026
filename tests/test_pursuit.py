@@ -180,7 +180,7 @@ class TestYaw(unittest.TestCase):
 
     def test_heading_about_up_with_the_bias_removed(self):
         tr = YawTracker()
-        t = self.feed(tr, 1.0, 0.0)                   # still: learns the bias
+        t = self.feed(tr, 1.5, 0.0)                   # settles, then learns the bias
         self.assertTrue(tr.ready)
         self.assertAlmostEqual(tr.yaw, 0.0, places=3)
         t = self.feed(tr, 2.0, math.radians(45), still=False, t0=t)   # turns left 90 deg
@@ -190,11 +190,36 @@ class TestYaw(unittest.TestCase):
 
     def test_bias_does_not_learn_while_the_wheels_turn(self):
         tr = YawTracker()
-        t = self.feed(tr, 1.0, 0.0)
+        t = self.feed(tr, 1.5, 0.0)
         bias = list(tr.bias)
         self.feed(tr, 3.0, 0.01, still=False, t0=t)  # a slow real turn, wheels moving
         self.assertEqual(tr.bias, bias)
         self.assertGreater(tr.yaw, 0.02)
+
+    def test_a_bad_start_is_fixed_by_stopping_and_standstill_never_drifts(self):
+        """What the robot did: the first bias came out 7.5 deg/s wrong. Now the
+        heading holds while the wheels are stopped and the bias re-learns, so
+        the next turn is measured right."""
+        tr = YawTracker()
+        t = self.feed(tr, 1.5, math.radians(7.5))     # the settling gyro fools the first bias
+        self.assertTrue(tr.ready)
+        t = self.feed(tr, 5.0, 0.0, t0=t)            # truly still, wheels stopped
+        self.assertAlmostEqual(math.degrees(tr.yaw), 0.0, delta=0.5)   # held, no drift
+        self.assertTrue(tr.holding)
+        t = self.feed(tr, 2.0, math.radians(45), still=False, t0=t)    # a real 90-degree turn
+        self.assertAlmostEqual(math.degrees(tr.yaw), 90.0, delta=2.0)
+
+    def test_turned_by_hand_while_stopped_still_counts(self):
+        tr = YawTracker()
+        t = self.feed(tr, 2.0, 0.0)
+        self.feed(tr, 1.0, math.radians(60), still=True, t0=t)       # 60 deg/s > hand_rate
+        self.assertAlmostEqual(math.degrees(tr.yaw), 60.0, delta=3.0)
+
+    def test_the_first_half_second_is_ignored(self):
+        tr = YawTracker()
+        self.feed(tr, 0.45, math.radians(90))        # garbage while settling
+        self.assertFalse(tr.ready)
+        self.assertEqual(tr.bias, [0.0, 0.0, 0.0])
 
     def test_nothing_before_the_bias_is_known(self):
         tr = YawTracker()
