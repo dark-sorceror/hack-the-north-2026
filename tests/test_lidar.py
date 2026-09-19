@@ -11,6 +11,7 @@ import logging
 import math
 import random
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -50,6 +51,8 @@ from retriever.bridge.lidar import (
     staleness,
 )
 
+SRC = Path(__file__).resolve().parents[1] / "src"
+ROOT = Path(__file__).resolve().parents[1]
 DEG = math.radians
 
 # The reader thread logs every retry at WARNING; the unplug test causes several.
@@ -621,6 +624,43 @@ class TestFakeLidar(unittest.TestCase):
         clock.t += 1.0
         _, _, th = pose()
         self.assertAlmostEqual(th, 0.2 / drv.geo.effective_track_m, delta=1e-3)
+
+
+# ---------------------------------------------------------------- the Pi
+
+
+class TestPiNeedsNoLibraries(unittest.TestCase):
+    def test_lidar_and_safety_import_without_pyserial_or_gpiozero(self):
+        code = (
+            f"import sys; sys.path.insert(0, {str(SRC)!r})\n"
+            "before = set(sys.modules)\n"
+            "import retriever.bridge.lidar, retriever.bridge.safety, retriever.bridge.server\n"
+            "new = {m.split('.')[0] for m in set(sys.modules) - before}\n"
+            "print(sorted(new - set(sys.stdlib_module_names) - {'retriever'}))\n"
+        )
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "[]")
+
+
+class TestLidarCheckScript(unittest.TestCase):
+    def run_script(self, *args):
+        return subprocess.run([sys.executable, str(ROOT / "scripts" / "lidar_check.py"), *args],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_fake_run_reports_sectors_and_the_front(self):
+        out = self.run_script("--fake", "--duration", "0.6", "--find-front")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("rev/s", out.stdout)
+        self.assertIn("front-left", out.stdout)
+        self.assertIn("--lidar-yaw-deg", out.stdout)
+
+    def test_record_mask_proposes_one_sector_per_self_part(self):
+        out = self.run_script("--fake", "--record-mask", "0.8", "--every", "5")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("proposed self-mask (2 sectors", out.stdout)
+        self.assertIn("--lidar-mask ", out.stdout)
 
 
 if __name__ == "__main__":
