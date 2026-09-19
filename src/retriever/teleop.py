@@ -839,6 +839,13 @@ class TeleopSession:
         hello = getattr(robot, "hello", None) if robot is not None else None
         snap["scrub"] = {"used": None if odo is None else odo.geo.scrub_factor,
                          "pi": None if hello is None else hello.scrub_factor}
+        gyro_turn = getattr(odo, "turn_gyro_rad", 0.0) if odo is not None else 0.0
+        snap["heading"] = {
+            "source": getattr(odo, "heading_source", "wheels") if odo is not None else None,
+            # how much more the wheels claim to turn than the gyro saw: the slip
+            "slip_pct": (round(100.0 * (odo.turn_wheels_rad / gyro_turn - 1.0), 1)
+                         if gyro_turn > math.radians(90) else None),
+        }
         snap["estop"] = bool(robot is not None and robot.estopped)
         snap["watchdog"] = bool(robot is not None and robot.watchdog_tripped)
         bubble = getattr(robot, "bubble", None) if robot is not None else None
