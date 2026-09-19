@@ -5,11 +5,13 @@ from __future__ import annotations
 import dataclasses
 import math
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from retriever.backends.base import RobotBackend
 from retriever.backends.fake import GRIPPER_CLOSED, MAX_JOINT_RATE, FakeRobot
+from retriever.memory import Memory, Sighting
 from retriever.types import Action, Observation, Pose, Result, Station, Target
 
 
@@ -144,6 +146,94 @@ class FakeRobotTest(unittest.TestCase):
     def test_missing_frames_dir_fails_loudly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, self.assertRaises(FileNotFoundError):
             FakeRobot(frames_dir=Path(tmp, "typo"))
+
+
+class MemoryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.memory = Memory()
+        self.addCleanup(self.memory.close)
+
+    def test_teach_round_trips_within_float32_precision(self) -> None:
+        embedding = [0.1, -2.5, 1e-3, 123.456]
+        object_id = self.memory.teach("keys", embedding)
+        [(stored_id, name, stored)] = self.memory.taught()
+        self.assertEqual((stored_id, name), (object_id, "keys"))
+        for want, got in zip(embedding, stored, strict=True):
+            self.assertTrue(math.isclose(want, got, rel_tol=1e-6), (want, got))
+
+    def test_reteaching_a_name_replaces_it_and_keeps_its_id(self) -> None:
+        first = self.memory.teach("keys", [1.0, 0.0])
+        self.memory.teach("mug", [0.0, 1.0])
+        second = self.memory.teach("Keys", [0.5, 0.5])
+        self.assertEqual(first, second)
+        taught = {name.lower(): embedding for _, name, embedding in self.memory.taught()}
+        self.assertEqual(taught, {"keys": [0.5, 0.5], "mug": [0.0, 1.0]})
+
+    def test_teach_refuses_empty_or_non_finite_embeddings(self) -> None:
+        for embedding in ([], [1.0, math.nan]):
+            with self.subTest(embedding=embedding), self.assertRaises(ValueError):
+                self.memory.teach("keys", embedding)
+
+    def test_last_seen_is_the_newest_sighting_not_the_last_written(self) -> None:
+        self.memory.saw("keys", Pose(1.0, 1.0), 0.9, at=2000.0)
+        self.memory.saw("keys", Pose(3.0, 3.0), 0.7, object_id="k1", at=1000.0)
+        self.assertEqual(
+            self.memory.last_seen("keys"), Sighting("keys", Pose(1.0, 1.0), 0.9, seen_at=2000.0)
+        )
+
+    def test_sighting_age(self) -> None:
+        sighting = Sighting("keys", Pose(), 0.9, seen_at=2000.0)
+        self.assertEqual(sighting.age_s(now=2060.0), 60.0)
+        self.assertGreater(sighting.age_s(), 0.0)
+
+    def test_labels_are_case_insensitive(self) -> None:
+        self.memory.saw("Keys", Pose(1.0, 0.0), 0.8, at=1000.0)
+        expected = Sighting("Keys", Pose(1.0, 0.0), 0.8, seen_at=1000.0)
+        self.assertEqual(self.memory.last_seen("keys"), expected)
+        self.assertEqual(self.memory.last_seen("KEYS"), expected)
+
+    def test_never_seen_is_none(self) -> None:
+        self.assertIsNone(self.memory.last_seen("unicorn"))
+
+    def test_saw_refuses_an_invalid_confidence(self) -> None:
+        with self.assertRaises(ValueError):
+            self.memory.saw("keys", Pose(), 1.5)
+
+    def test_summary_lists_the_newest_sighting_per_label_newest_first(self) -> None:
+        now = time.time()
+        self.memory.saw("keys", Pose(9.0, 9.0), 0.5, at=now - 3600)
+        self.memory.saw("Keys", Pose(1.2, 0.4), 0.82, at=now - 180)
+        self.memory.saw("mug", Pose(0.5, -1.0), 0.6, at=now - 2 * 3600)
+        self.memory.saw("remote", Pose(0.0, 2.0), 0.95, at=now - 1)
+        self.assertEqual(
+            self.memory.summary().splitlines(),
+            [
+                "remote: (0.00, 2.00) just now, conf 0.95",
+                "Keys: (1.20, 0.40) 3 min ago, conf 0.82",
+                "mug: (0.50, -1.00) 2 h ago, conf 0.60",
+            ],
+        )
+        self.assertEqual(len(self.memory.summary(limit=2).splitlines()), 2)
+
+    def test_summary_says_plainly_when_memory_is_empty(self) -> None:
+        self.assertIn("empty", self.memory.summary().lower())
+
+    def test_file_backed_memory_persists_and_creates_its_directory(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name, "runs", "today", "memory.db")
+        memory = Memory(path)
+        object_id = memory.teach("keys", [1.0, 2.0])
+        memory.saw("keys", Pose(1.0, 2.0, 0.5), 0.9, object_id=object_id, at=1000.0)
+        memory.close()
+
+        reopened = Memory(path)
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.taught(), [(object_id, "keys", [1.0, 2.0])])
+        self.assertEqual(
+            reopened.last_seen("keys"),
+            Sighting("keys", Pose(1.0, 2.0, 0.5), 0.9, seen_at=1000.0, object_id=object_id),
+        )
 
 
 if __name__ == "__main__":
