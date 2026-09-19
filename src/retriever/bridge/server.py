@@ -346,10 +346,10 @@ class BridgeServer:
         assert ticks is not None
         try:
             await asyncio.wait({ticks})
-            died = not self._closing
         finally:
+            ended_by_itself = not self._closing
             await self.close()
-        if died:
+        if ended_by_itself:
             raise RuntimeError("the bridge tick loop ended by itself; the motors were stopped")
 
     async def close(self) -> None:
