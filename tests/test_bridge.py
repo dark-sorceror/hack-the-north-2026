@@ -844,8 +844,8 @@ class FakePiScriptTest(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(out.returncode, 2)
-        # no pyserial: says it is missing; with pyserial: names the port it could not open
-        self.assertTrue("pyserial" in out.stderr or port in out.stderr, out.stderr)
+        # no pyserial: how to install it; with pyserial: names the port it could not open
+        self.assertTrue("pi/setup.sh" in out.stderr or port in out.stderr, out.stderr)
 
 
 class ImportTest(unittest.TestCase):

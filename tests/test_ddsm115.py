@@ -284,6 +284,13 @@ class TestHelpers(unittest.TestCase):
         with self.assertRaises(ConnectionError):
             find_wheel_port({}, [ftdi])
 
+    @unittest.skipIf(HAVE_PYSERIAL, "pyserial is installed here")
+    def test_without_pyserial_the_driver_says_how_to_install_it(self):
+        for call in (lambda: find_wheel_port({}), lambda: DDSM115Bus.open("/dev/null")):
+            with self.assertRaises(ImportError) as ctx:
+                call()
+            self.assertIn("pi/setup.sh", str(ctx.exception))
+
 
 # ---------------------------------------------------------------- start-up
 
@@ -795,6 +802,12 @@ class TestWheelCheck(unittest.TestCase):
         self.assertIn("found: 1,2,3", out)
         self.assertIn("not answering: 4", out)
         self.assertIn("stall", out)
+
+    @unittest.skipIf(HAVE_PYSERIAL, "pyserial is installed here: this would open real ports")
+    def test_without_pyserial_it_says_how_to_install_it(self):
+        out = io.StringIO()
+        self.assertEqual(self.mod.main(["scan"], out=out), 1)
+        self.assertIn("pi/setup.sh", out.getvalue())
 
     def test_everything_that_spins_refuses_without_yes(self):
         for argv in (("spin", "1"), ("sides",), ("rev", "1")):

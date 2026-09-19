@@ -39,6 +39,7 @@ from retriever.bridge.drivers import (  # noqa: E402
     DDSM115_COUNTS_PER_REV,
     DDSM115_MAX_RPM,
     DDSM115_MODES,
+    PYSERIAL_MISSING,
     WCH_USB_VID,
     DDSM115Bus,
     DDSM115Driver,
@@ -150,7 +151,7 @@ def _open_bus(port: str | None, reply_timeout_s: float, say: Say) -> DDSM115Bus:
     try:
         ports = [p for p in dd.list_ports.comports() if getattr(p, "vid", None) == WCH_USB_VID]
     except ImportError:
-        raise
+        raise ImportError(PYSERIAL_MISSING) from None
     except Exception:
         ports = []
     say("WCH USB serial adapters:" if ports else "WCH USB serial adapters: none found")

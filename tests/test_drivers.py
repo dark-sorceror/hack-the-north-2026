@@ -282,8 +282,8 @@ class WheelsNeedTheirBusTest(unittest.TestCase):
         for build in (lambda: DDSM115Driver(port), lambda: build_real_driver(port)):
             with self.assertRaises((ConnectionError, ImportError)) as ctx:
                 build()
-            # no pyserial: says it is missing; with pyserial: which port failed
-            self.assertTrue("pyserial" in str(ctx.exception) or port in str(ctx.exception),
+            # no pyserial: how to install it; with pyserial: which port failed
+            self.assertTrue("pi/setup.sh" in str(ctx.exception) or port in str(ctx.exception),
                             str(ctx.exception))
 
 
