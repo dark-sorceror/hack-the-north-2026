@@ -261,7 +261,7 @@ class BridgeRobot:
                 if not line:
                     break
                 self._on_line(line)
-        except (OSError, ValueError) as exc:  # ValueError: the file was closed under us
+        except Exception as exc:  # a dead reader must read as a dead link, never a quiet Pi
             why = f"the link to the Pi failed: {exc}"
         with self._changed:
             if self._link_down is None:
