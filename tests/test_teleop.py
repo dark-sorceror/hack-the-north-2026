@@ -19,6 +19,7 @@ from retriever.bridge.client import BridgeRobot
 from retriever.bridge.fake_driver import FakeTankDriver
 from retriever.bridge.lidar import FakeLidar, FakeTankPose, FakeWorld
 from retriever.bridge.server import BridgeServer, ServerThread
+from retriever.types import Pose
 from retriever.teleop import (
     DriveRecorder,
     TeleopConfig,
@@ -370,6 +371,71 @@ class TestHome(BridgeCase):
         s.goto(1.0, 0.0, round_trip=True)
         s.drive(1, 0)
         self.assertIsNone(s.auto)
+
+
+class TestTurnCalibration(unittest.TestCase):
+    """Spin N full turns by hand against a tape mark; the wheels' count vs the
+    truth is the scrub factor. The arithmetic, on a stand-in robot."""
+
+    def session(self, scrub=1.0):
+        from types import SimpleNamespace
+
+        s = TeleopSession(lambda: None)                  # never started: no threads
+        s.robot = SimpleNamespace(odometry=SimpleNamespace(geo=SimpleNamespace(scrub_factor=scrub)),
+                                  estopped=False)
+        s.link = "up"
+        return s
+
+    def test_wheels_overcounting_a_turn_raises_the_factor(self):
+        s = self.session(1.0)
+        s.turned = 5.0                                   # wherever it was
+        s.calib_start()
+        s.turned = 5.0 + math.radians(810)               # the wheels say 810 for a true 720
+        r = s.calib_done(2)
+        self.assertAlmostEqual(r["scrub_factor"], 810 / 720, places=3)
+        self.assertAlmostEqual(r["error_pct"], 12.5, places=1)
+        self.assertIsNone(s.calib)
+
+    def test_either_direction_and_an_existing_factor(self):
+        s = self.session(1.2)
+        s.calib_start()
+        s.turned = -math.radians(700)                    # spun clockwise; wheels under-count
+        r = s.calib_done(2)
+        self.assertAlmostEqual(r["scrub_factor"], 1.2 * 700 / 720, places=3)
+
+    def test_refuses_nonsense(self):
+        s = self.session()
+        with self.assertRaisesRegex(RuntimeError, "Start"):
+            s.calib_done(2)
+        s.calib_start()
+        s.turned = math.radians(30)
+        with self.assertRaisesRegex(RuntimeError, "hardly turned"):
+            s.calib_done(2)
+        with self.assertRaises(ValueError):
+            s.calib_done(0)
+
+    def test_the_session_counts_turns_past_a_wrap(self):
+        s = self.session()
+        s._seen.states = 2
+        for k in range(1, 30):                           # 29 steps of 25 deg, wrapped to +-180
+            th = math.remainder(math.radians(25 * k), math.tau)
+            s._note(s.robot, SimpleObs(Pose(0.0, 0.0, th), t=k * 0.1))
+        self.assertAlmostEqual(math.degrees(s.turned), 25 * 29, delta=1.0)
+
+
+class SimpleObs:
+    def __init__(self, base, t):
+        self.base, self.t = base, t
+
+
+class TestScrubOverride(BridgeCase):
+    def test_the_flag_changes_odometry_only(self):
+        bot = BridgeRobot("127.0.0.1", self.port, scrub_factor=1.3)
+        self.addCleanup(bot.close)
+        self.assertEqual(bot.odometry.geo.scrub_factor, 1.3)
+        self.assertEqual(bot.hello.scrub_factor, 1.0)     # the Pi still says its own
+        with self.assertRaises(ValueError):
+            BridgeRobot("127.0.0.1", self.port, scrub_factor=-1)
 
 
 class TestClickToGoRoundAPost(unittest.TestCase):

@@ -70,6 +70,9 @@ def main() -> int:
     ap.add_argument("--gears", default=None, help='m/s:rad/s per gear, e.g. "0.1:0.5,0.2:0.9"')
     ap.add_argument("--record", nargs="?", const="auto", default=None, metavar="PATH",
                     help="log states + scans as JSON lines (default: data/drives/<time>.jsonl)")
+    ap.add_argument("--scrub-factor", type=float, default=None,
+                    help="odometry's turn-slip factor, from the page's turn calibration "
+                         "(overrides the Pi's until its bridge runs with --scrub-factor too)")
     ap.add_argument("--footprint", default="0.25,0.25,0.20",
                     help="front,rear,half-width in m, for drawing the robot")
     ap.add_argument("--no-open", action="store_true", help="don't open a browser tab")
@@ -99,7 +102,7 @@ def main() -> int:
 
     def connect() -> BridgeRobot:
         try:
-            return BridgeRobot(host, bport, connect_timeout_s=2.0)
+            return BridgeRobot(host, bport, connect_timeout_s=2.0, scrub_factor=args.scrub_factor)
         except ConnectionError as exc:
             if "refused" in str(exc).lower():   # the Pi answered: nothing on the port
                 raise ConnectionError(

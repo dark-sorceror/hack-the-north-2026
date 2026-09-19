@@ -123,11 +123,17 @@ class BridgeRobot:
         heartbeat_hz: float = 10.0,
         geo: TankGeometry | None = None,
         subscribe: bool = True,
+        scrub_factor: float | None = None,
     ) -> None:
         """subscribe: ask for the lidar extensions (harmless on any Pi). False
-        behaves byte for byte like a client from before they existed."""
+        behaves byte for byte like a client from before they existed.
+        scrub_factor: use this instead of the Pi's for ODOMETRY only (a fresh
+        calibration, before it is set on the Pi). Closed-loop driving steers by
+        odometry, so this alone makes click-to-go turn by the right amount."""
         if not heartbeat_hz > 0.0:
             raise ValueError(f"heartbeat_hz must be positive, got {heartbeat_hz!r}")
+        if scrub_factor is not None and not (math.isfinite(scrub_factor) and scrub_factor > 0):
+            raise ValueError(f"scrub_factor must be a positive number, got {scrub_factor!r}")
         self._where = _join(host, port)
         self._observe_timeout_s = observe_timeout_s
         self._stale_after_s = stale_after_s
@@ -148,7 +154,7 @@ class BridgeRobot:
             self._hello = self._read_hello(connect_timeout_s)
             # The Pi owns these numbers; `geo` exists only to override them on purpose.
             self._odometry = TankOdometry(
-                geo if geo is not None else _geometry_of(self._hello),
+                geo if geo is not None else _geometry_of(self._hello, scrub_factor),
                 self._hello.counts_per_rev,
             )
             if subscribe:
@@ -280,6 +286,11 @@ class BridgeRobot:
     def hello(self) -> Hello:
         """The Hello the Pi opened the connection with."""
         return self._hello
+
+    @property
+    def odometry(self) -> TankOdometry:
+        """The odometry this laptop integrates, and the geometry it uses (odometry.geo)."""
+        return self._odometry
 
     @property
     def bubble(self) -> BubbleStatus | None:
@@ -433,8 +444,10 @@ def _connect(host: str, port: int, timeout_s: float, where: str) -> socket.socke
     return sock
 
 
-def _geometry_of(hello: Hello) -> TankGeometry:
-    return TankGeometry(hello.wheel_radius_m, hello.track_width_m, hello.scrub_factor)
+def _geometry_of(hello: Hello, scrub_factor: float | None = None) -> TankGeometry:
+    return TankGeometry(
+        hello.wheel_radius_m, hello.track_width_m, scrub_factor or hello.scrub_factor
+    )
 
 
 def _port(text: str, addr: str) -> int:

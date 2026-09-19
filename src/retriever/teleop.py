@@ -296,6 +296,9 @@ class TeleopSession:
         self._obs: Any = None                  # the latest Observation, for click-to-go
         self.auto: _Auto | None = None
         self.home = Pose()                     # where "go home" goes: the start, or set_home()
+        self.turned = 0.0                      # rad, total rotation the odometry has seen (signed)
+        self.calib: dict[str, float] | None = None    # a turn calibration in progress
+        self.calib_result: dict[str, Any] | None = None
         self.auto_status = ""                  # driving | arrived | home | gave up | stopped
         self.auto_detail = ""
         # None: nobody counts viewers (tests, scripts). serve() sets 0, and from
@@ -385,6 +388,48 @@ class TeleopSession:
         """Home is here, facing this way (it starts where teleop connected)."""
         with self._lock:
             self.home = self._seen.pose
+
+    # -- turn calibration ---------------------------------------------------
+
+    def calib_start(self) -> None:
+        """Tape at the nose, then this; spin it N full turns by hand; calib_done(N)."""
+        robot = self.robot
+        if robot is None or self.link != "up":
+            raise RuntimeError("not connected to the robot")
+        odo = getattr(robot, "odometry", None)
+        scrub = float(odo.geo.scrub_factor) if odo is not None else 1.0
+        with self._lock:
+            self._end_auto("stopped", "calibrating")
+            self.calib = {"turned0": self.turned, "scrub": scrub}
+            self.calib_result = None
+
+    def calib_done(self, turns: float) -> dict[str, Any]:
+        """The robot is back on the tape after `turns` full turns (either way).
+        The odometry's count against the truth gives the scrub factor."""
+        n = float(turns)
+        if not (math.isfinite(n) and 0.5 <= n <= 10):
+            raise ValueError("turns must be between 0.5 and 10")
+        with self._lock:
+            c = self.calib
+            if c is None:
+                raise RuntimeError("press Start first, with the robot lined up on the tape")
+            odo = self.turned - c["turned0"]
+            if abs(odo) < math.radians(90):
+                raise RuntimeError("it has hardly turned: spin it the full turns first")
+            truth = n * math.tau
+            new = c["scrub"] * abs(odo) / truth
+            self.calib = None
+            self.calib_result = {
+                "turns": n, "odometry_deg": round(math.degrees(abs(odo)), 1),
+                "true_deg": round(math.degrees(truth), 1),
+                "error_pct": round(100.0 * (abs(odo) - truth) / truth, 1),
+                "scrub_was": round(c["scrub"], 4), "scrub_factor": round(new, 4),
+            }
+            return self.calib_result
+
+    def calib_cancel(self) -> None:
+        with self._lock:
+            self.calib = None
 
     def _start_trip(self, legs: list[_Leg], wait_s: float) -> None:
         """Under self._lock."""
@@ -619,6 +664,8 @@ class TeleopSession:
             self._obs = obs
             p = obs.base
             s.odometer_m += math.hypot(p.x - s.pose.x, p.y - s.pose.y) if s.states > 1 else 0.0
+            if s.states > 1:
+                self.turned += math.remainder(p.theta - s.pose.theta, math.tau)
             s.pose = p
             if not self._trail or math.hypot(p.x - self._trail[-1][0],
                                              p.y - self._trail[-1][1]) >= 0.02:
@@ -730,6 +777,12 @@ class TeleopSession:
             route = getattr(a.ctl, "path", None) if a is not None else None
             snap["route"] = None if not route else [[round(x, 3), round(y, 3)] for x, y in route]
             snap["home"] = [round(self.home.x, 3), round(self.home.y, 3), round(self.home.theta, 4)]
+            snap["calib"] = {
+                "active": self.calib is not None,
+                "turned_deg": None if self.calib is None else round(
+                    math.degrees(self.turned - self.calib["turned0"]), 1),
+                "result": self.calib_result,
+            }
             snap["auto"] = {
                 "status": "driving" if a is not None else self.auto_status,
                 "detail": self.auto_detail,
@@ -742,6 +795,10 @@ class TeleopSession:
                 "plan": None if plan is None else {
                     k: plan.as_dict()[k] for k in ("status", "reason", "steer_deg", "speed")},
             }
+        odo = getattr(robot, "odometry", None) if robot is not None else None
+        hello = getattr(robot, "hello", None) if robot is not None else None
+        snap["scrub"] = {"used": None if odo is None else odo.geo.scrub_factor,
+                         "pi": None if hello is None else hello.scrub_factor}
         snap["estop"] = bool(robot is not None and robot.estopped)
         snap["watchdog"] = bool(robot is not None and robot.watchdog_tripped)
         bubble = getattr(robot, "bubble", None) if robot is not None else None
@@ -802,6 +859,12 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                     session.go_home()
                 elif self.path == "/sethome":
                     session.set_home()
+                elif self.path == "/calib/start":
+                    session.calib_start()
+                elif self.path == "/calib/done":
+                    session.calib_done(body.get("turns", 2))
+                elif self.path == "/calib/cancel":
+                    session.calib_cancel()
                 elif self.path == "/cancel":
                     session.cancel()
                 else:

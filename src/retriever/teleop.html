@@ -45,6 +45,11 @@
   #auto.driving { border-color:var(--trail); } #auto.arrived { border-color:var(--ok); }
   #auto.gaveup { border-color:var(--hot); }
   #auto .st { font-weight:700; }
+  details.cal { border:1px solid var(--rule); border-radius:6px; padding:8px 10px; }
+  details.cal summary { cursor:pointer; font-weight:600; }
+  details.cal ol { margin:6px 0; padding-left:18px; line-height:1.5; }
+  details.cal input { width:3.2em; font:inherit; }
+  #calout { line-height:1.5; margin-top:6px; } #calout code { user-select:all; }
   #auto.driving .st { color:var(--trail); } #auto.arrived .st { color:var(--ok); }
   #auto.gaveup .st, #auto .err { color:var(--hot); }
 </style></head>
@@ -78,6 +83,16 @@
       <tr><td class="k">driven</td><td class="v" id="odo">–</td></tr>
     </table>
     <div id="bubble" class="warn"></div>
+    <details class="cal" id="cal"><summary>Calibrate turning</summary>
+      <ol><li>Tape a mark on the floor at the robot's nose.</li>
+        <li>Press <b>Start</b>.</li>
+        <li>Spin it with <b>A</b> or <b>D</b> until it is back on the mark after
+          <input id="calturns" type="number" min="1" max="10" step="1" value="2"> full turns.</li>
+        <li>Press <b>Done</b>.</li></ol>
+      <div class="row"><button class="act" id="calstart">Start</button>
+        <button class="act" id="caldone">Done</button></div>
+      <div id="calout" class="k"></div>
+    </details>
     <button class="act big" id="estopbtn">E-STOP  (Esc)</button>
     <div class="row">
       <button class="act" id="clearbtn">clear e-stop</button>
@@ -168,6 +183,8 @@ async function command(path, body) {
 function goHome() { held.clear(); paintPad(); command('/home'); }
 $('homebtn').onclick = goHome;
 $('sethomebtn').onclick = () => command('/sethome');
+$('calstart').onclick = () => command('/calib/start');
+$('caldone').onclick = () => command('/calib/done', {turns: +$('calturns').value || 2});
 $('clearbtn').onclick = () => post('/clear');
 $('resetbtn').onclick = () => post('/reset');
 
@@ -316,9 +333,26 @@ function paint() {
     box.innerHTML = `<span class="st">${a.status[0].toUpperCase() + a.status.slice(1)}</span>`
       + (a.detail ? `: ${a.detail}` : '') + `<br><span class="k">Click the map to go again.</span>`;
   }
+  paintCalib(s);
   if (gear !== s.gear && !held.size) gear = s.gear;
   paintGears();
   draw();
+}
+function paintCalib(s) {
+  const c = s.calib, out = $('calout'), sc = s.scrub || {};
+  const using = sc.used == null ? '' : `Turn-slip factor in use: <b>${(+sc.used).toFixed(3)}</b>`
+    + (sc.pi != null && Math.abs(sc.pi - sc.used) > 1e-6 ? ` (the Pi says ${(+sc.pi).toFixed(3)})` : '');
+  if (!c) { out.innerHTML = using; return; }
+  if (c.active) {
+    out.innerHTML = `The wheels say it has turned <b>${Math.abs(c.turned_deg).toFixed(0)}°</b> `
+      + `(${(Math.abs(c.turned_deg) / 360).toFixed(2)} turns). Stop exactly on the mark, then Done.`;
+  } else if (c.result) {
+    const r = c.result, f = r.scrub_factor.toFixed(3);
+    out.innerHTML = `The wheels said <b>${r.odometry_deg.toFixed(0)}°</b> for a true ${r.true_deg.toFixed(0)}° `
+      + `(${r.error_pct > 0 ? '+' : ''}${r.error_pct}%). Turn-slip factor: <b>${f}</b> (was ${r.scrub_was}).<br>`
+      + `Use it now: restart teleop with <code>--scrub-factor ${f}</code><br>`
+      + `Keep it: on the Pi, run the bridge (scripts/fake_pi.py) with <code>--scrub-factor ${f}</code>`;
+  } else out.innerHTML = using;
 }
 function connect() {
   const es = new EventSource('/stream');
