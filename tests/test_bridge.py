@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
+import re
+import signal
 import socket
 import subprocess
 import sys
@@ -807,6 +809,41 @@ class BridgeRobotConnectTest(unittest.TestCase):
         for bad in ("", "pi:", "pi:http", "pi:0", "pi:65536", "[::1", "[::1]7777", "[]:1"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_address(bad)
+
+
+class FakePiScriptTest(unittest.TestCase):
+    SCRIPT = SRC.parent / "scripts" / "fake_pi.py"
+
+    def test_starts_answers_with_hello_and_stops_cleanly_on_sigint(self) -> None:
+        proc = subprocess.Popen(
+            [sys.executable, str(self.SCRIPT), "--host", "127.0.0.1", "--port", "0"],
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(proc.kill)
+        assert proc.stderr is not None
+        self.addCleanup(proc.stderr.close)
+        started = proc.stderr.readline()
+        match = re.search(r"listening on 127\.0\.0\.1 port (\d+);.*watchdog 300 ms", started)
+        self.assertIsNotNone(match, started)
+        assert match is not None
+        client = RawClient(int(match.group(1)))
+        self.addCleanup(client.close)
+        self.assertIsInstance(client.read(), Hello)
+        self.assertIsInstance(client.read(), State)
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=10), 0)
+        self.assertIn("motors stopped", proc.stderr.read())
+
+    def test_the_real_driver_is_not_written_yet_and_says_so(self) -> None:
+        out = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "--driver", "real"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("--driver fake", out.stderr)
 
 
 class ImportTest(unittest.TestCase):
