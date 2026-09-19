@@ -40,6 +40,13 @@
   .note { color:var(--soft); font-size:11.5px; line-height:1.5; }
   #bubble { min-height:1.4em; }
   .row { display:flex; gap:6px; } .row > * { flex:1; }
+  canvas { cursor:crosshair; }
+  #auto { border:1px solid var(--rule); border-radius:6px; padding:9px 10px; line-height:1.45; }
+  #auto.driving { border-color:var(--trail); } #auto.arrived { border-color:var(--ok); }
+  #auto.gaveup { border-color:var(--hot); }
+  #auto .st { font-weight:700; }
+  #auto.driving .st { color:var(--trail); } #auto.arrived .st { color:var(--ok); }
+  #auto.gaveup .st, #auto .err { color:var(--hot); }
 </style></head>
 <body>
 <header>
@@ -57,6 +64,8 @@
       <button class="s" data-k="b">S</button><button class="d" data-k="r">D</button>
     </div>
     <div class="gears" id="gears"></div>
+    <div id="auto"><span class="st">Click the map</span> to send it there.
+      <span class="k">Right-click, space or any drive key cancels.</span></div>
     <table>
       <tr><td class="k">asked</td><td class="v" id="cmd">–</td></tr>
       <tr><td class="k">measured</td><td class="v" id="meas">–</td></tr>
@@ -71,7 +80,8 @@
     </div>
     <div class="note">Hold <b>W A S D</b> or arrows to drive; let go to stop.
       <b>1 2 3</b> speed · <b>space</b> stop now · <b>Esc</b> e-stop (latched on the Pi).
-      Leaving this tab stops the robot. Grid: 0.5 m. Trail = odometry.</div>
+      Leaving this tab stops the robot. Grid: 0.5 m. Trail = odometry.
+      Click-to-go aims at where the robot <i>believes</i> that spot is.</div>
   </aside>
 </main>
 <script>
@@ -144,6 +154,7 @@ $('resetbtn').onclick = () => post('/reset');
 
 // ---- the view: follows the robot, world x (start heading) points up
 const cv = $('cv'), cx = cv.getContext('2d');
+let view = null, autoErr = '';
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 function draw() {
   const dpr = devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
@@ -153,6 +164,7 @@ function draw() {
   if (!snap) return;
   const [rx, ry, th] = snap.pose, S = Math.min(W, H) / 6;          // 6 m across
   const sx = (x, y) => W / 2 - (y - ry) * S, sy = (x, y) => H / 2 - (x - rx) * S;
+  view = {rx, ry, S, W, H};
   cx.strokeStyle = css('--rule'); cx.lineWidth = 1; cx.beginPath();
   for (let g = Math.floor((rx - 6) * 2) / 2; g <= rx + 6; g += 0.5) { cx.moveTo(0, sy(g, 0)); cx.lineTo(W, sy(g, 0)); }
   for (let g = Math.floor((ry - 6) * 2) / 2; g <= ry + 6; g += 0.5) { cx.moveTo(sx(0, g), 0); cx.lineTo(sx(0, g), H); }
@@ -176,7 +188,34 @@ function draw() {
   cx.stroke();
   const [nx, ny] = corner(fr + 0.12, 0), [ox, oy] = corner(0, 0);
   cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(nx, ny); cx.stroke();
+  const a = snap.auto;
+  if (a && a.goal) {
+    const gx = sx(a.goal[0], a.goal[1]), gy = sy(a.goal[0], a.goal[1]);
+    cx.strokeStyle = css('--trail'); cx.lineWidth = 1.5; cx.setLineDash([5, 5]);
+    cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(gx, gy); cx.stroke(); cx.setLineDash([]);
+    cx.lineWidth = 2.5; cx.beginPath();
+    cx.arc(gx, gy, 9, 0, 2 * Math.PI); cx.moveTo(gx - 14, gy); cx.lineTo(gx + 14, gy);
+    cx.moveTo(gx, gy - 14); cx.lineTo(gx, gy + 14); cx.stroke();
+    if (a.plan) {                                   // where the avoidance is steering
+      const b = th + a.plan.steer_deg * Math.PI / 180, L = (0.25 + 0.5 * a.plan.speed) * S;
+      const [ex, ey] = [ox - Math.sin(b) * L, oy - Math.cos(b) * L];
+      cx.strokeStyle = a.plan.status === 'blocked' ? css('--bad') : css('--ok'); cx.lineWidth = 3;
+      cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(ex, ey); cx.stroke();
+    }
+  }
 }
+cv.addEventListener('click', async e => {
+  if (!view) return;
+  const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+  const x = view.rx - (py - view.H / 2) / view.S, y = view.ry - (px - view.W / 2) / view.S;
+  held.clear(); paintPad();
+  try {
+    const res = await fetch('/goto', {method:'POST', headers:{'Content-Type':'application/json'},
+                                      body: JSON.stringify({x, y})});
+    autoErr = res.ok ? '' : ((await res.json().catch(() => ({}))).error || res.statusText);
+  } catch (err) { autoErr = 'teleop server unreachable'; }
+});
+cv.addEventListener('contextmenu', e => { e.preventDefault(); post('/cancel'); });
 
 function fmt(n, d = 2) { return (n >= 0 ? ' ' : '') + n.toFixed(d); }
 function paint() {
@@ -197,6 +236,21 @@ function paint() {
   const b = s.bubble;
   $('bubble').textContent = !b ? (s.scan ? '' : 'no lidar on the Pi: nothing stops it but you')
     : b.state === 'clear' ? '' : `lidar bubble ${b.state}: ${b.reason}`;
+  const a = s.auto, box = $('auto');
+  if (autoErr) {
+    box.className = 'gaveup';
+    box.innerHTML = `<span class="st err">Can't go:</span> ${autoErr}`;
+  } else if (a.status === 'driving') {
+    box.className = 'driving';
+    const how = a.avoiding ? (a.plan && a.plan.status !== 'clear' ? a.plan.reason : 'lidar: way clear')
+                           : 'no lidar: straight line, nothing stops it but you';
+    box.innerHTML = `<span class="st">Driving</span> to ${a.goal[0].toFixed(2)}, ${a.goal[1].toFixed(2)}`
+      + (a.dist != null ? ` · ${a.dist.toFixed(2)} m to go` : '') + `<br><span class="k">${how}</span>`;
+  } else if (a.status) {
+    box.className = a.status === 'arrived' ? 'arrived' : a.status === 'gave up' ? 'gaveup' : '';
+    box.innerHTML = `<span class="st">${a.status[0].toUpperCase() + a.status.slice(1)}</span>`
+      + (a.detail ? `: ${a.detail}` : '') + `<br><span class="k">Click the map to go again.</span>`;
+  }
   if (gear !== s.gear && !held.size) gear = s.gear;
   paintGears();
   draw();
