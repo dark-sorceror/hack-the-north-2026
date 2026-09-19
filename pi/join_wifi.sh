@@ -3,6 +3,7 @@
 #
 #   sudo bash pi/join_wifi.sh "Hao's iPhone" PASSWORD          # priority 10
 #   sudo bash pi/join_wifi.sh "TeamRouter" PASSWORD 20          # preferred when in range
+#   sudo bash pi/join_wifi.sh "ASUS_30" "" 20                   # an OPEN network: "" password
 #
 # The robot runs untethered: the Pi rides on it and the Mac reaches it over
 # Wi-Fi, so both must join the same network (a phone hotspot or a travel
@@ -69,7 +70,8 @@ SSID=""
 for s in "${CANDIDATES[@]}"; do
   nmcli con delete "$CON" > /dev/null 2>&1 || true
   # hidden yes always: a reboot while the phone hides its name must still join
-  if nmcli --wait 30 dev wifi connect "$s" password "$PASS" ifname wlan0 name "$CON" hidden yes; then
+  if [ -n "$PASS" ]; then AUTH=(password "$PASS"); else AUTH=(); fi   # "" = an open network
+  if nmcli --wait 30 dev wifi connect "$s" ${AUTH[@]+"${AUTH[@]}"} ifname wlan0 name "$CON" hidden yes; then
     SSID="$s"
     break
   fi
@@ -86,6 +88,10 @@ nmcli con mod "$CON" connection.autoconnect yes connection.autoconnect-priority 
 
 echo
 echo "joined \"$SSID\" as $CON, priority $PRIORITY (power saving off, retries forever)"
+if [ -z "$PASS" ]; then
+  echo "  WARNING: \"$SSID\" is OPEN. Anyone who joins it can reach the robot's bridge (:7777),"
+  echo "  which has no login. Set a Wi-Fi password on the router, then run this again with it."
+fi
 ip -4 -o addr show wlan0 | awk '{print "  wlan0 address: " $4}'
 echo "  the Mac must join \"$SSID\" too; then from the Mac: $(hostname).local"
 echo "  saved Wi-Fi (the highest priority in range wins):"
