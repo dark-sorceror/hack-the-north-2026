@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# One-shot Pi setup. Run ON the Pi, from ~/retriever:   bash pi/setup.sh
+# One-shot Pi setup. Run ON the Pi, from ~/retriever:
+#
+#   bash pi/setup.sh                  # bridge with the FAKE wheels, on every boot
+#   bash pi/setup.sh --driver real    # the real DDSM115 wheels (any fake_pi.py flags work)
 #
 # Rehearsed on the Pi 4 so the Pi 5 is a repeat, not an experiment. Idempotent:
 # safe to run again after pulling new code.
@@ -10,6 +13,11 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 echo "retriever at $HERE, user $USER"
+# Everything given to this script goes on the bridge's command line, in the unit.
+BRIDGE_ARGS="${*:---driver fake}"
+case "$BRIDGE_ARGS" in *'|'* | *'&'* | *'\'*)
+  echo "setup.sh: bridge arguments may not contain | & or \\" >&2; exit 2 ;; esac
+echo "bridge arguments: $BRIDGE_ARGS"
 
 # The bridge itself is stdlib-only. These are for the REAL drivers and GPIO:
 # pyserial for the arm and wheel buses, gpiozero + lgpio because RPi.GPIO does
@@ -83,7 +91,7 @@ if [ -f "$PIDFILE" ]; then
   rm -f "$PIDFILE"
 fi
 
-sed -e "s|__USER__|$USER|" -e "s|__HOME__|$HOME|" \
+sed -e "s|__USER__|$USER|" -e "s|__HOME__|$HOME|" -e "s|__BRIDGE_ARGS__|$BRIDGE_ARGS|" \
     -e "s|^SupplementaryGroups=.*|SupplementaryGroups=$GROUPS_OK|" \
     "$HERE/pi/retriever-bridge.service" \
   | { if [ -z "$GROUPS_OK" ]; then grep -v '^SupplementaryGroups='; else cat; fi; } \
@@ -95,7 +103,7 @@ sleep 1
 systemctl --no-pager --lines=5 status retriever-bridge || true
 
 echo
-echo "bridge listening on $(hostname).local:7777 (all addresses, IPv4 + IPv6)"
+echo "bridge listening on $(hostname).local:7777 (all addresses, IPv4 + IPv6): $BRIDGE_ARGS"
 echo "  logs:     journalctl -u retriever-bridge -f"
 echo "  restart:  sudo systemctl restart retriever-bridge   (after every scripts/pi_deploy.sh)"
 echo "  from the laptop:"
