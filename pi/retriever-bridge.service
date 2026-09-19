@@ -1,0 +1,23 @@
+# systemd unit: the bridge starts on boot and restarts if it dies.
+#
+# A robot whose bridge needs someone to ssh in and start it is a robot that
+# does not move after a battery swap. Install with pi/setup.sh.
+[Unit]
+Description=Retriever Pi bridge (laptop <-> motors/arms, with watchdog)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__HOME__/retriever
+# FAKE driver until the real DDSM115 / SO-101 drivers land -- change --driver
+# to real once they do. The watchdog and e-stop latch work identically either way.
+ExecStart=/usr/bin/python3 __HOME__/retriever/scripts/fake_pi.py --host 0.0.0.0 --port 7777 --driver fake
+Restart=always
+RestartSec=1
+# Serial ports (arm, wheels) and GPIO (e-stop, vacuum relay).
+SupplementaryGroups=dialout gpio
+
+[Install]
+WantedBy=multi-user.target
