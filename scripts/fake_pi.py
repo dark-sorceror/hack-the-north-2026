@@ -42,6 +42,7 @@ from retriever.bridge.drivers import (  # noqa: E402
 from retriever.bridge.fake_driver import FakeTankDriver  # noqa: E402
 from retriever.bridge.gpio import EstopButton, VacuumOverlay, VacuumRelay  # noqa: E402
 from retriever.bridge.protocol import DEFAULT_PORT  # noqa: E402
+from retriever.bridge.safety import add_lidar_args, lidar_from_args  # noqa: E402
 from retriever.bridge.server import BridgeServer, HardwareDriver  # noqa: E402
 from retriever.navigation.kinematics import TankGeometry  # noqa: E402
 
@@ -90,6 +91,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--track-width", type=float, default=defaults.track_width_m)
     parser.add_argument("--scrub-factor", type=float, default=defaults.scrub_factor)
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    # Lidar safety bubble: all off unless --lidar-port or --fake-lidar is given.
+    add_lidar_args(parser)
     return parser.parse_args(argv)
 
 
@@ -141,9 +144,11 @@ def main(argv: list[str] | None = None) -> int:
                 "e-stop on GPIO%s (%s): %s", args.estop_pin,
                 "normally-open" if args.estop_normally_open else "normally-closed", pressed)
 
+    lidar = None
     try:
         geo = TankGeometry(args.wheel_radius, args.track_width, args.scrub_factor)
         driver = build_driver(args, geo, relay)
+        lidar, bubble = lidar_from_args(args, driver)   # (None, None) unless asked for
         server = BridgeServer(
             driver,
             args.host,
@@ -154,10 +159,14 @@ def main(argv: list[str] | None = None) -> int:
             state_hz=args.state_hz,
             max_wheel_mps=args.max_wheel_mps,
             estop_input=button,
+            lidar=lidar,
+            bubble=bubble,
+            scan_hz=args.scan_hz,
         )
-    except (ConnectionError, FileNotFoundError, ImportError, RuntimeError, ValueError) as exc:
+    except (ConnectionError, FileNotFoundError, ImportError, NotImplementedError,
+            RuntimeError, ValueError) as exc:
         print(f"fake_pi: {exc}", file=sys.stderr)
-        _close(relay, button)
+        _close(lidar, relay, button)
         return 2
     settings = (
         f"{args.driver} driver, watchdog {args.timeout_ms:g} ms, "
