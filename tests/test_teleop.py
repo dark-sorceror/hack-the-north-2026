@@ -317,6 +317,61 @@ class TestClickToGo(BridgeCase):
         self.assertEqual(snap["auto"]["detail"], "nobody is watching the page")
 
 
+class TestHome(BridgeCase):
+    """No lidar, as on the first autonomous test: straight lines, odometry only."""
+
+    def test_go_home_drives_back_and_faces_the_way_it_started(self):
+        s = self.session()
+        s.core.gear = 2
+        s.goto(0.6, 0.4)
+        self.assertEqual(wait_done(s)["auto"]["status"], "arrived")
+        s.go_home()
+        snap = wait_done(s)
+        self.assertEqual(snap["auto"]["status"], "home", snap["auto"])
+        x, y, th = snap["pose"]
+        self.assertLess(math.hypot(x, y), 0.1)
+        self.assertLess(abs(math.degrees(math.remainder(th, math.tau))), 5.0)
+
+    def test_round_trip_goes_there_waits_and_comes_back(self):
+        s = self.session()
+        s.core.gear = 2
+        s.goto(0.7, -0.3, round_trip=True, wait_s=0.4)
+        far, waited = 0.0, False
+        deadline = time.monotonic() + 30.0
+        while s.auto is not None and time.monotonic() < deadline:
+            snap = s.snapshot()
+            far = max(far, snap["pose"][0])
+            waited = waited or snap["auto"]["phase"] == "wait"
+            time.sleep(0.05)
+        snap = s.snapshot()
+        self.assertTrue(waited)
+        self.assertGreater(far, 0.6)                     # it really went out there
+        self.assertEqual(snap["auto"]["status"], "home", snap["auto"])
+        self.assertLess(math.hypot(snap["pose"][0], snap["pose"][1]), 0.1)
+        self.assertLess(abs(math.degrees(math.remainder(snap["pose"][2], math.tau))), 5.0)
+
+    def test_set_home_moves_home(self):
+        s = self.session()
+        s.core.gear = 2
+        s.goto(0.5, 0.0)
+        wait_done(s)
+        s.set_home()
+        home = s.snapshot()["home"]
+        s.goto(0.5, 0.5)
+        wait_done(s)
+        s.go_home()
+        snap = wait_done(s)
+        self.assertEqual(snap["auto"]["status"], "home")
+        self.assertLess(math.hypot(snap["pose"][0] - home[0], snap["pose"][1] - home[1]), 0.1)
+        self.assertLess(abs(math.remainder(snap["pose"][2] - home[2], math.tau)), math.radians(5))
+
+    def test_a_key_cancels_a_round_trip(self):
+        s = self.session()
+        s.goto(1.0, 0.0, round_trip=True)
+        s.drive(1, 0)
+        self.assertIsNone(s.auto)
+
+
 class TestClickToGoRoundAPost(unittest.TestCase):
     """With a lidar on the Pi, the path bends round what is in the way."""
 
@@ -391,6 +446,11 @@ class TestHttp(BridgeCase):
         self.assertIsNone(self.s.auto)
         self.assertEqual(self.post("/goto", {"x": 0.5}), 400)
         self.assertEqual(self.post("/goto", {"x": 500, "y": 0}), 409)
+        self.assertEqual(self.post("/goto", {"x": 0.5, "y": 0, "round_trip": True}), 204)
+        self.assertEqual(len(self.s.auto.legs), 2)
+        self.assertEqual(self.post("/sethome", {}), 204)
+        self.assertEqual(self.post("/home", {}), 204)
+        self.assertEqual(self.s.auto.legs[0].label, "home")
 
 
 if __name__ == "__main__":

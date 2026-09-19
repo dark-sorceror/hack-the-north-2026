@@ -203,21 +203,40 @@ class DriveRecorder:
 
 
 ARRIVE_M = 0.08          # click-to-go is done this close to the spot (position only)
+FACE_TOL_RAD = 0.05      # a leg that ends facing a heading is done within ~3 degrees
+FACE_MIN_WZ = 0.25       # rad/s: slower than this and a skid-steer just sits there
 MAX_GOAL_M = 15.0        # a click further than this is a mis-click
 VIEWER_GRACE_S = 1.0     # page closed this long -> click-to-go stops
+PICKUP_WAIT_S = 2.0      # a round trip waits this long at the far end
+
+
+@dataclass
+class _Leg:
+    """One stretch of a trip: drive to `goal`, and if `face`, turn to its heading."""
+
+    goal: Pose
+    face: bool
+    label: str                # "there" | "home"
 
 
 @dataclass
 class _Auto:
-    """One click-to-go trip."""
+    """One click-to-go trip: one leg, or there-and-home."""
 
-    goal: Pose
-    ctl: Any                  # DifferentialGotoController or AvoidingGotoController
+    legs: list[_Leg]          # legs[0] is the one being driven
+    ctl: Any                  # PathFollower, AvoidingGotoController or DifferentialGotoController
     robot: Any                # the link it started on; a reconnect ends the trip
-    started: float            # time.monotonic()
+    started: float            # time.monotonic() the current leg started
     timeout_s: float
-    avoiding: bool            # steering round what the lidar sees
+    avoiding: bool            # the route / steering uses the lidar
+    wait_s: float = 0.0       # pause between legs (the pick-up)
+    phase: str = "drive"      # drive | face | wait
+    wait_until: float = 0.0
     dist: float | None = None
+
+    @property
+    def goal(self) -> Pose:
+        return self.legs[0].goal
 
 
 @dataclass
@@ -276,7 +295,8 @@ class TeleopSession:
         self._threads: list[threading.Thread] = []
         self._obs: Any = None                  # the latest Observation, for click-to-go
         self.auto: _Auto | None = None
-        self.auto_status = ""                  # driving | arrived | gave up | stopped
+        self.home = Pose()                     # where "go home" goes: the start, or set_home()
+        self.auto_status = ""                  # driving | arrived | home | gave up | stopped
         self.auto_detail = ""
         # None: nobody counts viewers (tests, scripts). serve() sets 0, and from
         # then on click-to-go only drives while at least one page is watching.
@@ -337,41 +357,70 @@ class TeleopSession:
         if robot is not None:
             robot.estop("teleop page")
 
-    def goto(self, x: float, y: float) -> None:
-        """Click-to-go: drive to (x, y) in the odometry frame. Raises
-        RuntimeError (said to the page as is) when it can't start."""
+    def goto(self, x: float, y: float, round_trip: bool = False,
+             wait_s: float = PICKUP_WAIT_S) -> None:
+        """Click-to-go: drive to (x, y) in the odometry frame. round_trip: then
+        wait wait_s (the pick-up) and drive home, ending facing home's heading.
+        Raises RuntimeError (said to the page as is) when it can't start."""
         gx, gy = float(x), float(y)
         if not (math.isfinite(gx) and math.isfinite(gy)):
             raise ValueError("x and y must be finite numbers")
-        robot = self.robot
-        if robot is None or self.link != "up":
-            raise RuntimeError("not connected to the robot")
-        if getattr(robot, "estopped", False):
-            raise RuntimeError("the e-stop is latched: clear it first")
         with self._lock:
             pose = self._seen.pose
             d = math.hypot(gx - pose.x, gy - pose.y)
             if d > MAX_GOAL_M:
                 raise RuntimeError(f"that's {d:.0f} m away; click closer than {MAX_GOAL_M:.0f} m")
-            v, w = self.core.config.gears[self.core.gear]
-            limits = Limits(v_max=v, w_max=w, pos_tol=ARRIVE_M)
-            lidar = (getattr(robot, "scan", None) is not None
-                     or getattr(robot, "bubble", None) is not None)
-            if lidar and self.mapper is not None and self.mapper.scans:
-                ctl: Any = PathFollower(self.mapper, limits, FollowConfig(),
-                                        bubble=lambda: getattr(robot, "bubble", None))
-            elif lidar:
-                config = AvoidConfig.for_footprint(*self.footprint)
-                ctl = AvoidingGotoController(bridge_scan_source(robot), limits, config)
-            else:
-                ctl = DifferentialGotoController(limits)
             # Heading = the way it will be going: arriving needs no final turn.
-            goal = Pose(gx, gy, math.atan2(gy - pose.y, gx - pose.x))
-            self.auto = _Auto(goal, ctl, robot, time.monotonic(),
-                              timeout_s=max(20.0, 10.0 + 4.0 * d / v), avoiding=lidar, dist=d)
-            self.core.fwd = self.core.turn = 0.0     # no key target underneath it
-            self.core._heard = None
-            self.auto_status, self.auto_detail = "driving", ""
+            legs = [_Leg(Pose(gx, gy, math.atan2(gy - pose.y, gx - pose.x)), False, "there")]
+            if round_trip:
+                legs.append(_Leg(self.home, True, "home"))
+            self._start_trip(legs, wait_s if round_trip else 0.0)
+
+    def go_home(self) -> None:
+        """Drive back to home and turn to face the way it faced there."""
+        with self._lock:
+            self._start_trip([_Leg(self.home, True, "home")], 0.0)
+
+    def set_home(self) -> None:
+        """Home is here, facing this way (it starts where teleop connected)."""
+        with self._lock:
+            self.home = self._seen.pose
+
+    def _start_trip(self, legs: list[_Leg], wait_s: float) -> None:
+        """Under self._lock."""
+        robot = self.robot
+        if robot is None or self.link != "up":
+            raise RuntimeError("not connected to the robot")
+        if getattr(robot, "estopped", False):
+            raise RuntimeError("the e-stop is latched: clear it first")
+        self.auto = _Auto(legs, None, robot, 0.0, 0.0, False, wait_s=wait_s)
+        self._start_leg(self.auto)
+        self.core.fwd = self.core.turn = 0.0     # no key target underneath it
+        self.core._heard = None
+        self.auto_status, self.auto_detail = "driving", ""
+
+    def _start_leg(self, a: _Auto) -> None:
+        """A fresh controller for a.legs[0], at the current gear's speed.
+        Under self._lock."""
+        robot = a.robot
+        pose = self._seen.pose
+        d = math.hypot(a.goal.x - pose.x, a.goal.y - pose.y)
+        v, w = self.core.config.gears[self.core.gear]
+        limits = Limits(v_max=v, w_max=w, pos_tol=ARRIVE_M)
+        lidar = (getattr(robot, "scan", None) is not None
+                 or getattr(robot, "bubble", None) is not None)
+        if lidar and self.mapper is not None and self.mapper.scans:
+            a.ctl = PathFollower(self.mapper, limits, FollowConfig(),
+                                 bubble=lambda: getattr(robot, "bubble", None))
+        elif lidar:
+            a.ctl = AvoidingGotoController(bridge_scan_source(robot), limits,
+                                           AvoidConfig.for_footprint(*self.footprint))
+        else:
+            a.ctl = DifferentialGotoController(limits)
+        a.avoiding = lidar
+        a.phase, a.dist = "drive", d
+        a.started = time.monotonic()
+        a.timeout_s = max(20.0, 10.0 + 4.0 * d / v) + (10.0 if a.legs[0].face else 0.0)
 
     def cancel(self) -> None:
         with self._lock:
@@ -405,6 +454,10 @@ class TeleopSession:
                 and now - self._viewers_gone > VIEWER_GRACE_S):
             self._end_auto("stopped", "nobody is watching the page")
             return None
+        if a.phase == "wait":
+            if now < a.wait_until:
+                return 0.0, 0.0
+            self._start_leg(a)
         if now - a.started > a.timeout_s:
             self._end_auto("gave up", f"I didn't get there in {a.timeout_s:.0f} s")
             return None
@@ -413,9 +466,15 @@ class TeleopSession:
             return 0.0, 0.0                             # no fresh state: hold still
         p = obs.base
         a.dist = math.hypot(a.goal.x - p.x, a.goal.y - p.y)
+        if a.phase == "face":
+            err = math.remainder(a.goal.theta - p.theta, math.tau)
+            if abs(err) <= FACE_TOL_RAD:
+                return self._leg_done(a, now, p)
+            w = self.core.config.gears[self.core.gear][1]
+            wz = max(-w, min(w, 2.2 * err))
+            return 0.0, math.copysign(max(abs(wz), FACE_MIN_WZ), err)
         if a.dist <= ARRIVE_M:
-            self._end_auto("arrived", f"{a.dist * 100:.0f} cm from the spot")
-            return None
+            return self._leg_arrived(a, now, p)
         step_observation = getattr(a.ctl, "step_observation", None)
         if step_observation is not None:
             action, done = step_observation(obs, a.goal)
@@ -426,9 +485,30 @@ class TeleopSession:
             self._end_auto("gave up", failure[0])
             return None
         if done:
-            self._end_auto("arrived", f"{a.dist * 100:.0f} cm from the spot")
-            return None
+            return self._leg_arrived(a, now, p)
         return action.base_vx, action.base_wz
+
+    def _leg_arrived(self, a: _Auto, now: float, p: Pose) -> tuple[float, float] | None:
+        """In position. Turn to face if the leg asks, else the leg is done."""
+        leg = a.legs[0]
+        if leg.face and abs(math.remainder(leg.goal.theta - p.theta, math.tau)) > FACE_TOL_RAD:
+            a.phase = "face"
+            return 0.0, 0.0
+        return self._leg_done(a, now, p)
+
+    def _leg_done(self, a: _Auto, now: float, p: Pose) -> tuple[float, float] | None:
+        leg = a.legs.pop(0)
+        cm = math.hypot(leg.goal.x - p.x, leg.goal.y - p.y) * 100
+        deg = abs(math.degrees(math.remainder(leg.goal.theta - p.theta, math.tau)))
+        if a.legs:                                   # the far end of a round trip: the pick-up
+            a.phase, a.wait_until = "wait", now + a.wait_s
+            self.auto_detail = f"{cm:.0f} cm from the spot"
+            return 0.0, 0.0
+        if leg.label == "home":
+            self._end_auto("home", f"{cm:.0f} cm and {deg:.0f}\u00b0 from where it started")
+        else:
+            self._end_auto("arrived", f"{cm:.0f} cm from the spot")
+        return None
 
     def clear_estop(self) -> None:
         robot = self.robot
@@ -447,6 +527,7 @@ class TeleopSession:
             self._history.clear()
             self._seen.odometer_m = 0.0
             self._seen.pose = Pose()
+            self.home = Pose()
             if self.mapper is not None:
                 self.mapper.reset()             # it was drawn in the frame just reset
 
@@ -648,9 +729,13 @@ class TeleopSession:
             plan = getattr(a.ctl, "plan", None) if a is not None else None
             route = getattr(a.ctl, "path", None) if a is not None else None
             snap["route"] = None if not route else [[round(x, 3), round(y, 3)] for x, y in route]
+            snap["home"] = [round(self.home.x, 3), round(self.home.y, 3), round(self.home.theta, 4)]
             snap["auto"] = {
                 "status": "driving" if a is not None else self.auto_status,
                 "detail": self.auto_detail,
+                "leg": None if a is None else a.legs[0].label,
+                "phase": None if a is None else a.phase,
+                "then_home": bool(a is not None and len(a.legs) > 1),
                 "goal": None if a is None else [round(a.goal.x, 3), round(a.goal.y, 3)],
                 "dist": None if a is None or a.dist is None else round(a.dist, 2),
                 "avoiding": bool(a is not None and a.avoiding),
@@ -712,7 +797,11 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                 elif self.path == "/reset":
                     session.reset_pose()
                 elif self.path == "/goto":
-                    session.goto(body["x"], body["y"])
+                    session.goto(body["x"], body["y"], round_trip=bool(body.get("round_trip")))
+                elif self.path == "/home":
+                    session.go_home()
+                elif self.path == "/sethome":
+                    session.set_home()
                 elif self.path == "/cancel":
                     session.cancel()
                 else:
