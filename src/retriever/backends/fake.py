@@ -15,6 +15,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+from retriever.navigation.geometry import distance
+from retriever.navigation.odometry import integrate_twist
 from retriever.types import JOINTS, Action, Observation, Pose
 
 MAX_JOINT_RATE = 2.5  # rad/s: joints slew toward targets, never teleport
@@ -23,7 +25,6 @@ GRIPPER_CLOSED = 0.15  # gripper position at/below which it counts as closed
 _GRIPPER_OPEN = 1.0  # where the gripper starts
 _GRASP_REACH_M = 0.25  # an object this close to the base can be grasped
 _HELD_LOAD = 0.6  # normalised servo current while something is in the gripper
-_STRAIGHT_TURN_RAD = 1e-9  # below this heading change per step, the arc is a straight line
 
 
 class FakeRobot:
@@ -75,7 +76,7 @@ class FakeRobot:
     def act(self, action: Action) -> None:
         """Apply `action` and advance the simulation by one `dt`."""
         _check(action)
-        self._base = _integrate_twist(
+        self._base = integrate_twist(
             self._base, action.base_vx, action.base_vy, action.base_wz, self._dt
         )
         was_closed = self._gripper_closed()
@@ -108,12 +109,11 @@ class FakeRobot:
             self._holding = None
 
     def _object_in_reach(self) -> str | None:
-        in_reach = [
-            (math.hypot(pose.x - self._base.x, pose.y - self._base.y), label)
-            for label, pose in self._objects.items()
-        ]
-        in_reach = [(dist, label) for dist, label in in_reach if dist <= _GRASP_REACH_M]
-        return min(in_reach)[1] if in_reach else None
+        nearest = min(
+            ((distance(self._base, pose), label) for label, pose in self._objects.items()),
+            default=None,
+        )
+        return nearest[1] if nearest is not None and nearest[0] <= _GRASP_REACH_M else None
 
 
 def _jpegs_in(frames_dir: Path) -> list[Path]:
@@ -131,20 +131,3 @@ def _check(action: Action) -> None:
     numbers = (action.base_vx, action.base_vy, action.base_wz, *action.joints.values())
     if not all(math.isfinite(value) for value in numbers):
         raise ValueError(f"non-finite value in {action!r}")
-
-
-def _integrate_twist(pose: Pose, vx: float, vy: float, wz: float, dt: float) -> Pose:
-    """Move `pose` along the arc that a constant body twist traces over `dt`."""
-    turn = wz * dt
-    if abs(turn) < _STRAIGHT_TURN_RAD:
-        forward, left = vx * dt, vy * dt
-    else:
-        along, across = math.sin(turn) / wz, (1.0 - math.cos(turn)) / wz
-        forward, left = vx * along - vy * across, vx * across + vy * along
-    cos_t, sin_t = math.cos(pose.theta), math.sin(pose.theta)
-    theta = (pose.theta + turn + math.pi) % (2.0 * math.pi) - math.pi
-    return Pose(
-        pose.x + forward * cos_t - left * sin_t,
-        pose.y + forward * sin_t + left * cos_t,
-        theta,
-    )
