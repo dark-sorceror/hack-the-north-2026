@@ -22,8 +22,13 @@ takes corners as gentle arcs; slow, it aims close and hugs the curve.
   * A tank can't swing its nose round while driving, so an aim point more than
     rotate_deg off the nose is turned to on the spot first, and it keeps
     turning until within rotate_until_deg (no flicker between the two).
-  * Speed falls with curvature and with the distance left, and with cos(alpha)
-    so it is mostly lined up before it goes fast.
+  * Speed is whatever the corner allows: the turn rate the base has
+    (w_max / curvature), the sideways acceleration a tall robot should take
+    (sqrt(lat_accel_max / curvature)), and the distance left. Then a heading
+    factor that is 1 while the aim point is within align_full_deg and falls to
+    0 by rotate_deg, where it turns on the spot instead. Slowing to a crawl on
+    every bend, as an earlier "v_max / (1 + k*curvature)" did, is not safety:
+    it is a tank crawling round a 0.5 m radius at 0.1 m/s.
   * reverse=True drives the curve backwards (the rear leads). Coming home that
     way skips the 180-degree turn-around: the one turn where a skid-steer's
     wheel slip costs the most heading.
@@ -95,14 +100,18 @@ def path_length(path: Sequence[Point]) -> float:
 
 @dataclass(frozen=True)
 class PursuitConfig:
+    # Aiming further ahead is smoother and faster through bends, and cuts their
+    # corners more. Measured on an S-curve of 0.5 m radii (gear 2): (0.25, 0.45)
+    # 16 s and 16 cm off, (0.30, 0.55) 14 s and 19 cm, (0.45, 0.90) 11 s and 27 cm.
     lookahead_min_m: float = 0.30
-    lookahead_max_m: float = 0.70
+    lookahead_max_m: float = 0.55
     lookahead_per_mps: float = 1.2    # L = min + this * |speed|, capped at max
     rotate_deg: float = 60.0          # aim point this far off the nose: turn on the spot...
     rotate_until_deg: float = 15.0    # ...until it is this close
     k_turn: float = 2.2               # rad/s per rad, turning on the spot
     min_turn_wz: float = 0.25         # slower than this and a skid-steer just sits there
-    curvature_slow: float = 1.0       # v <= v_max / (1 + this * |curvature|)
+    lat_accel_max: float = 0.5        # m/s^2 sideways in a bend: v <= sqrt(this / |curvature|)
+    align_full_deg: float = 25.0      # full speed while the aim point is this close to the nose
     arrive_gain: float = 1.2          # v <= this * distance left
     creep_mps: float = 0.05
     search_ahead_m: float = 1.5       # nearest-point search window, ahead of the last one
@@ -218,9 +227,12 @@ class PathTracker:
 
         ld = max(0.05, math.hypot(cx - p.x, cy - p.y))
         curvature = 2.0 * math.sin(alpha) / ld
-        v = lim.v_max / (1.0 + c.curvature_slow * abs(curvature))
-        v = min(v, max(c.creep_mps, c.arrive_gain * math.hypot(end[0] - p.x, end[1] - p.y)))
-        v *= max(0.0, math.cos(alpha))
+        k = max(abs(curvature), 1e-6)
+        v = min(lim.v_max, lim.w_max / k, math.sqrt(c.lat_accel_max / k))
+        v = min(v, max(c.creep_mps, c.arrive_gain * d_end))
+        lo = math.cos(math.radians(c.rotate_deg))
+        hi = math.cos(math.radians(c.align_full_deg))
+        v *= max(0.0, min(1.0, (math.cos(alpha) - lo) / (hi - lo)))
         wz = v * curvature
         if abs(wz) > lim.w_max:                        # too tight at this speed: slow, keep the arc
             v *= lim.w_max / abs(wz)
