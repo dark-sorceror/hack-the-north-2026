@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Put the Pi on a Wi-Fi network for good, the robot way. Run ON the Pi:
 #
-#   sudo bash pi/join_wifi.sh "Hao's iPhone" PASSWORD
+#   sudo bash pi/join_wifi.sh "Hao's iPhone" PASSWORD          # priority 10
+#   sudo bash pi/join_wifi.sh "TeamRouter" PASSWORD 20          # preferred when in range
 #
 # The robot runs untethered: the Pi rides on it and the Mac reaches it over
 # Wi-Fi, so both must join the same network (a phone hotspot or a travel
@@ -13,12 +14,14 @@
 #     latency spikes that makes trip the bridge's 300 ms watchdog.
 #   * Retries forever: a hotspot switched off and on again is rejoined, instead
 #     of NetworkManager giving up after 4 tries.
-#   * Saved as the connection "robot-wifi", preferred over other saved networks.
-#     Running it again replaces it; `sudo nmcli con delete robot-wifi` removes it.
+#   * Every network is KEPT, saved as its own connection "robot-<name>": join
+#     the team router and the hotspot stays as the fallback. The Pi picks the
+#     highest PRIORITY in range (default 10). Running it again for the same
+#     name replaces just that one; `nmcli con show` lists them.
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: sudo bash pi/join_wifi.sh \"NETWORK NAME\" PASSWORD" >&2
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+  echo "usage: sudo bash pi/join_wifi.sh \"NETWORK NAME\" PASSWORD [PRIORITY]" >&2
   exit 2
 fi
 if [ "$(id -u)" -ne 0 ]; then
@@ -27,6 +30,10 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 WANT="$1"
 PASS="$2"
+PRIORITY="${3:-10}"
+case "$PRIORITY" in *[!0-9]* | "") echo "join_wifi.sh: PRIORITY must be a number" >&2; exit 2 ;; esac
+# one saved connection per network: robot-<name with anything odd made a dash>
+CON="robot-$(printf '%s' "$WANT" | tr -c 'A-Za-z0-9_-' '-' | sed -e 's/--*/-/g' -e 's/-$//')"
 
 norm() { # lower case, every apostrophe-like character -> '
   printf '%s' "$1" | sed -e "s/’/'/g" -e "s/‘/'/g" -e "s/\`/'/g" | tr '[:upper:]' '[:lower:]'
@@ -60,24 +67,26 @@ fi
 
 SSID=""
 for s in "${CANDIDATES[@]}"; do
-  nmcli con delete robot-wifi > /dev/null 2>&1 || true
+  nmcli con delete "$CON" > /dev/null 2>&1 || true
   # hidden yes always: a reboot while the phone hides its name must still join
-  if nmcli --wait 30 dev wifi connect "$s" password "$PASS" ifname wlan0 name robot-wifi hidden yes; then
+  if nmcli --wait 30 dev wifi connect "$s" password "$PASS" ifname wlan0 name "$CON" hidden yes; then
     SSID="$s"
     break
   fi
 done
 if [ -z "$SSID" ]; then
-  nmcli con delete robot-wifi > /dev/null 2>&1 || true
+  nmcli con delete "$CON" > /dev/null 2>&1 || true
   echo "join_wifi.sh: could not join \"$WANT\". Visible networks:" >&2
   nmcli -t -e no -f SSID dev wifi list ifname wlan0 | sort -u | sed 's/^/    /' >&2
   echo "Check the password, and open Settings > Personal Hotspot on the phone." >&2
   exit 1
 fi
-nmcli con mod robot-wifi connection.autoconnect yes connection.autoconnect-priority 10 \
+nmcli con mod "$CON" connection.autoconnect yes connection.autoconnect-priority "$PRIORITY" \
   connection.autoconnect-retries 0 802-11-wireless.powersave 2 802-11-wireless.hidden yes
 
 echo
-echo "joined \"$SSID\" as robot-wifi (power saving off, retries forever)"
+echo "joined \"$SSID\" as $CON, priority $PRIORITY (power saving off, retries forever)"
 ip -4 -o addr show wlan0 | awk '{print "  wlan0 address: " $4}'
 echo "  the Mac must join \"$SSID\" too; then from the Mac: $(hostname).local"
+echo "  saved Wi-Fi (the highest priority in range wins):"
+nmcli -t -f NAME,TYPE,AUTOCONNECT-PRIORITY con show | awk -F: '$2 ~ /wireless/ {print "    " $1 "  priority " $3}'
