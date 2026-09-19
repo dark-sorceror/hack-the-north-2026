@@ -28,7 +28,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 . "$HERE/pi_doctor.sh"
 
 REMOTE_DIR=retriever                  # relative to the Pi user's home
-TEST_MODULES="tests.test_bridge tests.test_tank_backend tests.test_gpio tests.test_drivers tests.test_odometry"
+TEST_MODULES="tests.test_bridge tests.test_tank_backend tests.test_drivers tests.test_odometry"
 SYNC_DIRS="src scripts pi tests"
 
 usage() {
@@ -55,7 +55,7 @@ Deploy the bridge to the Raspberry Pi and check it, in one command:
   --no-preflight     skip pi_doctor.sh (it takes a few seconds when all is well)
   --no-sync          do not copy code; use what is already on the Pi (e.g. just
                      re-measure: --no-sync --skip-tests --link-test 30)
-  -- ARGS...         passed to scripts/fake_pi.py, e.g. -- --estop-pin 17
+  -- ARGS...         passed to scripts/fake_pi.py, e.g. -- --timeout-ms 500
 
   e.g.  scripts/pi_deploy.sh --run --link-test 30
         scripts/pi_deploy.sh --stop
@@ -186,7 +186,7 @@ pi_remote() {
 
 # --------------------------------------------------------------- laptop side ---
 
-# host:port as link_test.py / run_robot.py take it (they split on the LAST ':',
+# host:port as link_test.py takes it (it splits on the LAST ':',
 # so a bare fe80::1%en9:7777 works and must not be bracketed).
 hostport() { printf '%s:%s' "$PI_HOST" "$PI_PORT"; }
 
@@ -198,7 +198,7 @@ wait_bridge() {
     BRIDGE_PROBE=$(tcp_probe "$PI_HOST" "$PI_PORT" 3)
     case $BRIDGE_PROBE in
       *'"type":"hello"'*) return 0 ;;
-      *busy*) return 2 ;;
+      *'another client'*) return 2 ;;
     esac
     [ "$SECONDS" -ge "$deadline" ] && return 1
     sleep 1
@@ -327,7 +327,6 @@ main() {
     esac
     echo "    log:   ssh $PI_USER@$PI_HOST tail -f $REMOTE_DIR/run/bridge.log"
     echo "    stop:  scripts/pi_deploy.sh --stop$hostflag"
-    echo "    drive: $py scripts/run_robot.py --bridge $(hostport)"
   fi
 
   # 5. --link-test ------------------------------------------------------------------
