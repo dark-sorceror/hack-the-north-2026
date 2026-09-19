@@ -354,10 +354,11 @@ class BridgeServer:
 
     async def close(self) -> None:
         """Stop accepting, drop the client and stop the motors; safe to call twice."""
+        # Deliberately free of awaits: no tick can run in between, and a caller cancelled
+        # half-way cannot leave the motors running.
         if self._closing:
             return
         self._closing = True
-        # Everything up to the stop is synchronous, so no tick can run in between.
         if self._ticks is not None:
             self._ticks.cancel()
         if self._server is not None:
@@ -365,8 +366,6 @@ class BridgeServer:
         if self._client is not None:
             self._drop(self._client, "the bridge is shutting down")
         self.core.disconnected(self._clock())
-        if self._ticks is not None:
-            await asyncio.wait({self._ticks})
         logger.info("bridge closed; motors stopped")
 
     def trigger_estop(self, reason: str = "local estop") -> None:
