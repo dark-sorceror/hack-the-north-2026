@@ -56,6 +56,7 @@ from typing import Any, Callable
 
 from retriever.navigation.avoid import AvoidConfig, bridge_scan_source
 from retriever.navigation.drive import AvoidingGotoController, DifferentialGotoController, Limits
+from retriever.navigation.pursuit import PathTracker, path_length, waypoint_curve
 from retriever.types import Action, Pose
 
 try:  # the map needs numpy; without it click-to-go falls back to avoid.py alone
@@ -212,11 +213,14 @@ PICKUP_WAIT_S = 2.0      # a round trip waits this long at the far end
 
 @dataclass
 class _Leg:
-    """One stretch of a trip: drive to `goal`, and if `face`, turn to its heading."""
+    """One stretch of a trip: drive to `goal`, and if `face`, turn to its heading.
+    With a `path`, follow that curve there (pure pursuit), backwards if `reverse`."""
 
     goal: Pose
     face: bool
-    label: str                # "there" | "home"
+    label: str                # "there" | "home" | "path" | "back"
+    path: list[tuple[float, float]] | None = None
+    reverse: bool = False
 
 
 @dataclass
@@ -379,6 +383,36 @@ class TeleopSession:
                 legs.append(_Leg(self.home, True, "home"))
             self._start_trip(legs, wait_s if round_trip else 0.0)
 
+    def follow_path(self, points: list[Any], come_back: bool = False,
+                    reverse_back: bool = True, wait_s: float = PICKUP_WAIT_S) -> None:
+        """Drive a smooth curve from here through the clicked waypoints (pure
+        pursuit). come_back: then wait wait_s and retrace it to where it
+        started, ending facing the way it started. reverse_back: retrace it
+        backwards instead of turning round, which cancels the wheels' turn slip:
+        every turn on the way back undoes one on the way out."""
+        pts = []
+        for q in points:
+            x, y = float(q[0]), float(q[1])
+            if not (math.isfinite(x) and math.isfinite(y)):
+                raise ValueError("waypoints must be finite numbers")
+            pts.append((x, y))
+        if not pts:
+            raise ValueError("no waypoints")
+        if len(pts) > 50:
+            raise ValueError("at most 50 waypoints")
+        with self._lock:
+            start = self._seen.pose
+            curve = waypoint_curve([(start.x, start.y)] + pts)
+            if len(curve) < 2 or path_length(curve) < 0.05:
+                raise RuntimeError("the path is too short to drive")
+            if path_length(curve) > 4 * MAX_GOAL_M:
+                raise RuntimeError("that path is too long")
+            end = curve[-1]
+            legs = [_Leg(Pose(end[0], end[1], 0.0), False, "path", curve)]
+            if come_back:
+                legs.append(_Leg(start, True, "back", list(reversed(curve)), reverse_back))
+            self._start_trip(legs, wait_s if come_back else 0.0)
+
     def go_home(self) -> None:
         """Drive back to home and turn to face the way it faced there."""
         with self._lock:
@@ -454,7 +488,11 @@ class TeleopSession:
         limits = Limits(v_max=v, w_max=w, pos_tol=ARRIVE_M)
         lidar = (getattr(robot, "scan", None) is not None
                  or getattr(robot, "bubble", None) is not None)
-        if lidar and self.mapper is not None and self.mapper.scans:
+        leg = a.legs[0]
+        if leg.path is not None:                    # a drawn curve: follow it as drawn
+            a.ctl = PathTracker(leg.path, limits, reverse=leg.reverse)
+            d = path_length(leg.path)
+        elif lidar and self.mapper is not None and self.mapper.scans:
             a.ctl = PathFollower(self.mapper, limits, FollowConfig(),
                                  bubble=lambda: getattr(robot, "bubble", None))
         elif lidar:
@@ -462,7 +500,7 @@ class TeleopSession:
                                            AvoidConfig.for_footprint(*self.footprint))
         else:
             a.ctl = DifferentialGotoController(limits)
-        a.avoiding = lidar
+        a.avoiding = lidar and leg.path is None     # a drawn curve is followed as drawn
         a.phase, a.dist = "drive", d
         a.started = time.monotonic()
         a.timeout_s = max(20.0, 10.0 + 4.0 * d / v) + (10.0 if a.legs[0].face else 0.0)
@@ -518,7 +556,7 @@ class TeleopSession:
             w = self.core.config.gears[self.core.gear][1]
             wz = max(-w, min(w, 2.2 * err))
             return 0.0, math.copysign(max(abs(wz), FACE_MIN_WZ), err)
-        if a.dist <= ARRIVE_M:
+        if a.dist <= ARRIVE_M and a.legs[0].path is None:
             return self._leg_arrived(a, now, p)
         step_observation = getattr(a.ctl, "step_observation", None)
         if step_observation is not None:
@@ -529,6 +567,8 @@ class TeleopSession:
         if failure is not None:
             self._end_auto("gave up", failure[0])
             return None
+        if getattr(a.ctl, "remaining_m", None) is not None:
+            a.dist = a.ctl.remaining_m                 # along the curve, not as the crow flies
         if done:
             return self._leg_arrived(a, now, p)
         return action.base_vx, action.base_wz
@@ -549,7 +589,7 @@ class TeleopSession:
             a.phase, a.wait_until = "wait", now + a.wait_s
             self.auto_detail = f"{cm:.0f} cm from the spot"
             return 0.0, 0.0
-        if leg.label == "home":
+        if leg.label in ("home", "back"):
             self._end_auto("home", f"{cm:.0f} cm and {deg:.0f}\u00b0 from where it started")
         else:
             self._end_auto("arrived", f"{cm:.0f} cm from the spot")
@@ -855,6 +895,12 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                     session.reset_pose()
                 elif self.path == "/goto":
                     session.goto(body["x"], body["y"], round_trip=bool(body.get("round_trip")))
+                elif self.path == "/path":
+                    pts = body["points"]
+                    if not isinstance(pts, list):
+                        raise ValueError("points must be a list of [x, y]")
+                    session.follow_path(pts, come_back=bool(body.get("come_back")),
+                                        reverse_back=bool(body.get("reverse_back", True)))
                 elif self.path == "/home":
                     session.go_home()
                 elif self.path == "/sethome":
