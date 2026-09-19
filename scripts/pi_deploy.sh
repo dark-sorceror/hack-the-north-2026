@@ -351,19 +351,33 @@ main() {
     # Any whole second of silence is > the 300 ms watchdog: that is a failure.
     silent=$(grep -c 'no data for 1 s' "$out" || true)
     closed=$(grep -c 'closed the connection' "$out" || true)
+    # link_test.py now reports outages itself (including silence at the very end
+    # of the run) with this verdict and exit 1; the checks on rc 0 below stay as
+    # a backstop for an older link_test.py.
+    local outage=0
+    grep -q 'VERDICT: the link went down' "$out" && outage=1
     rm -f "$out"
+    local silent_msg="went completely silent for ~${silent} s (the '!! no data' lines)"
+    [ "${silent:-0}" -gt 0 ] || silent_msg="went completely silent at the end of the run"
     case $rc in
       0)
         if [ "${closed:-0}" -gt 0 ]; then
           die 6 "link test: the Pi closed the connection mid-test (bridge restarted or crashed? ssh $PI_USER@$PI_HOST tail ~/$REMOTE_DIR/run/bridge.log)"
         elif [ "${silent:-0}" -gt 0 ]; then
-          die 6 "link test: the link went completely silent for ~${silent} s (the '!! no data' lines), far past the 300 ms watchdog -- the verdict above misses a stall at the very end. Diagnose: scripts/pi_doctor.sh$hostflag"
+          die 6 "link test: the link $silent_msg, far past the 300 ms watchdog -- the verdict above misses a stall at the very end. Diagnose: scripts/pi_doctor.sh$hostflag"
         fi
         ;;
       142) die 6 "link_test.py did not finish within $((link + 30)) s" ;;
       *)
-        [ "$tripped" = 1 ] && die 6 "link test: the watchdog tripped on this link (verdict above). If preflight warned that NetworkManager is waiting for DHCP, that is the cause: eth0 drops every 45 s"
-        die 6 "link test could not run (exit $rc, see above). Diagnose: scripts/pi_doctor.sh$hostflag" ;;
+        if [ "${closed:-0}" -gt 0 ]; then
+          die 6 "link test: the Pi closed the connection mid-test (bridge restarted or crashed? ssh $PI_USER@$PI_HOST tail ~/$REMOTE_DIR/run/bridge.log)"
+        elif [ "$outage" = 1 ] || [ "${silent:-0}" -gt 0 ]; then
+          die 6 "link test: the link $silent_msg -- an outage, not jitter; no watchdog setting fixes it. If preflight warned that NetworkManager is waiting for DHCP, that is the cause: eth0 drops every 45 s. Diagnose: scripts/pi_doctor.sh$hostflag"
+        elif [ "$tripped" = 1 ]; then
+          die 6 "link test: the watchdog tripped on this link (verdict above). If preflight warned that NetworkManager is waiting for DHCP, that is the cause: eth0 drops every 45 s"
+        else
+          die 6 "link test could not run (exit $rc, see above). Diagnose: scripts/pi_doctor.sh$hostflag"
+        fi ;;
     esac
   fi
 
