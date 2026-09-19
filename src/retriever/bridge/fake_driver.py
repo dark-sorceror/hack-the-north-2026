@@ -43,6 +43,7 @@ class FakeTankDriver:
         if not battery_life_s > 0.0:
             raise ValueError(f"battery_life_s must be positive, got {battery_life_s!r}")
         self.counts_per_rev = counts_per_rev
+        self.geo = geo
         self._encoders = TankEncoderSim(geo.wheel_radius_m, counts_per_rev)
         self._joint_names = frozenset(joint_names)
         self._clock = clock
@@ -54,6 +55,7 @@ class FakeTankDriver:
         self._started_at = self._caught_up_to = clock()
         # Test affordances.
         self.wheel_speeds = (0.0, 0.0)  # last commanded (left, right) rim speeds, m/s
+        self.wheel_travel_m = (0.0, 0.0)  # unwrapped (left, right) rim distance rolled, m
         self.stop_count = 0
         self.vacuum = False
         self.object_in_gripper = False  # closing the gripper on it reports load
@@ -111,6 +113,8 @@ class FakeTankDriver:
             return
         self._caught_up_to = now
         self._encoders.step(*self.wheel_speeds, dt)
+        (left, right), (v_left, v_right) = self.wheel_travel_m, self.wheel_speeds
+        self.wheel_travel_m = (left + v_left * dt, right + v_right * dt)
         max_step = self._max_joint_rate * dt
         for name, target in self._targets.items():
             error = target - self._joints[name]
