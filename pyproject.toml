@@ -1,0 +1,17 @@
+[project]
+name = "retriever"
+version = "0.1.0"
+description = "A robot that finds things, decides what to do with them, and acts"
+requires-python = ">=3.10"
+dependencies = []  # the core, the Pi bridge and the cloud client are stdlib-only by design
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 96
+target-version = "py310"
