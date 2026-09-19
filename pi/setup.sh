@@ -74,6 +74,16 @@ for g in dialout gpio plugdev; do
 done
 GROUPS_OK="${GROUPS_OK# }"
 
+# The header's I2C bus for the robot's IMU (bridge/mpu.py). Needs a reboot the
+# first time: /dev/i2c-1 appears only after the firmware reads config.txt.
+CFG=/boot/firmware/config.txt
+if [ -f "$CFG" ] && ! grep -qE '^dtparam=i2c_arm=on' "$CFG"; then
+  echo 'dtparam=i2c_arm=on' | sudo tee -a "$CFG" > /dev/null
+  echo "i2c: enabled in $CFG -- REBOOT for /dev/i2c-1 to appear"
+fi
+echo i2c-dev | sudo tee /etc/modules-load.d/retriever-i2c.conf > /dev/null
+sudo modprobe i2c-dev 2>/dev/null || true
+
 # The D435i's gyro (/dev/hidrawN) for the group plugdev, instead of root only.
 sudo install -m 0644 "$HERE/pi/99-retriever-d435i.rules" /etc/udev/rules.d/99-retriever-d435i.rules
 sudo udevadm control --reload
