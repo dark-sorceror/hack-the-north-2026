@@ -12,9 +12,10 @@ afterwards so the failure is still heard.
                    (USB-RS485 adapter), built on the frame/CRC/parse functions
                    of a teammate's known-working ddsm115.py (vendored as
                    bridge/ddsm115.py). Unit-tested against a byte-level fake
-                   bus; NOT yet run on the robot. Left/right IDs, forward
-                   direction, counts_per_rev and wheel radius are unverified:
-                   scripts/wheel_check.py checks them.
+                   bus, and driven on the robot: the mirrored IDs and the
+                   position sign are measured there. counts_per_rev and the
+                   wheel radius are still unverified: scripts/wheel_check.py
+                   checks them.
 
 Import cost: this module stays stdlib-only at import time. The device libraries
 (pyserial, the vendored ddsm115) are imported inside the methods that need them,
@@ -116,6 +117,15 @@ class VacuumDriver(Protocol):
 # many counts and asks whether the tape mark came back to its start. A position
 # >= counts_per_rev is caught at runtime and refuses odometry.
 DDSM115_COUNTS_PER_REV = 32768
+# Measured on the robot, 2026-09-19: a DDSM115's position counter runs DOWN
+# while it turns at +rpm (the wheel's own velocity sign). Every delta read off
+# it is multiplied by this before the motor's mounting sign. Without it the
+# wheels' odometry reads backwards: W moved the robot, odometry said it reversed.
+DDSM115_POSITION_SIGN = -1
+# Which motors are mirror-mounted (+rpm drives the robot BACKWARD), measured on
+# the robot the same day: the teammate's FLIPPED = {3, 4} drove it back-end
+# first and turned it right on "left". The vendored ddsm115.py keeps its own.
+ROBOT_FLIPPED_IDS = (1, 2)
 DDSM115_MAX_RPM = 330               # protocol limit; rated 115 rpm, ~200 rpm no-load
 DDSM115_BAUD = 115200
 WCH_USB_VID = 0x1A86                # WCH CH34x: the Waveshare USB-RS485 adapter
@@ -323,7 +333,7 @@ class DDSM115Driver:
 
     Conventions (defaults UNVERIFIED on the robot; scripts/wheel_check.py sides):
       left_ids / right_ids   (1, 2) / (3, 4).
-      flipped_ids            the teammate's FLIPPED = {3, 4}: mirror-mounted
+      flipped_ids            ROBOT_FLIPPED_IDS = (1, 2), measured: mirror-mounted
                              motors, so they get -rpm and +rpm is robot-forward
                              on every ID. The flip follows the motor ID, not the
                              side, because it is about how that motor is mounted.
@@ -394,9 +404,10 @@ class DDSM115Driver:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        dd = self._dd = _ddsm115()
+        self._dd = _ddsm115()
         left, right = tuple(int(i) for i in left_ids), tuple(int(i) for i in right_ids)
-        flipped = set(dd.FLIPPED if flipped_ids is None else (int(i) for i in flipped_ids))
+        flipped = set(ROBOT_FLIPPED_IDS if flipped_ids is None
+                      else (int(i) for i in flipped_ids))
         every = left + right
         if not left or not right:
             raise ValueError("each side needs at least one motor ID")
@@ -582,7 +593,8 @@ class DDSM115Driver:
         if m.raw is None or rejoined:
             m.raw = pos             # (re)joining: no delta across a gap we did not see
         else:
-            m.count += m.sign * unwrap_ticks(pos, m.raw, self.counts_per_rev)
+            m.count += (m.sign * DDSM115_POSITION_SIGN
+                        * unwrap_ticks(pos, m.raw, self.counts_per_rev))
             m.raw = pos
 
     def _usable(self, m: _Motor) -> bool:
@@ -846,7 +858,7 @@ def build_real_driver(
 
     wheel_port None: $DDSM115_PORT, else the one WCH USB adapter
     (find_wheel_port refuses to guess between two). left_ids, right_ids and
-    flipped_ids (None: the teammate's {3, 4}) are unverified until
+    flipped_ids (None: ROBOT_FLIPPED_IDS, measured) are unverified until
     `scripts/wheel_check.py sides` says otherwise."""
     base = DDSM115Driver(wheel_port, geo=geo, left_ids=left_ids, right_ids=right_ids,
                          flipped_ids=flipped_ids, counts_per_rev=wheel_counts_per_rev,
