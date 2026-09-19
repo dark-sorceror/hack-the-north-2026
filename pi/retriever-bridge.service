@@ -13,7 +13,14 @@ User=__USER__
 WorkingDirectory=__HOME__/retriever
 # FAKE driver until the real DDSM115 / SO-101 drivers land -- change --driver
 # to real once they do. The watchdog and e-stop latch work identically either way.
-ExecStart=/usr/bin/python3 __HOME__/retriever/scripts/fake_pi.py --host 0.0.0.0 --port 7777 --driver fake
+#
+# --host= (the EMPTY host) binds every address, IPv4 AND IPv6. On the direct
+# cable to the laptop the Pi may have only an IPv6 link-local address
+# (fe80::...%eth0, no DHCP, no IPv4), where 0.0.0.0 is unreachable. "::" is not
+# the fix: asyncio sets IPV6_V6ONLY, so "::" alone refuses every IPv4 client
+# (venue Wi-Fi, Internet Sharing's 192.168.2.x). The empty host makes asyncio
+# open one socket per family, and it binds even before any link is up.
+ExecStart=/usr/bin/python3 __HOME__/retriever/scripts/fake_pi.py --host= --port 7777 --driver fake
 Restart=always
 RestartSec=1
 # Serial ports (arm, wheels) and GPIO (e-stop, vacuum relay).
