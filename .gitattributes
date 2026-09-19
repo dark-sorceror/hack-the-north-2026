@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts run on the Linux dev board and must keep LF endings even when
+# checked out on Windows, or bash fails with `\r: command not found`.
+*.sh text eol=lf
