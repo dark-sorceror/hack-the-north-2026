@@ -45,6 +45,10 @@
   #auto.driving { border-color:var(--trail); } #auto.arrived { border-color:var(--ok); }
   #auto.gaveup { border-color:var(--hot); }
   #auto .st { font-weight:700; }
+  #pathbox { border:1px solid var(--rule); border-radius:6px; padding:8px 10px; line-height:1.5; }
+  #pathbox.on { border-color:var(--trail); }
+  #pathbox .ctl { display:none; margin-top:6px; } #pathbox.on .ctl { display:block; }
+  #pathbox label { display:block; margin:6px 0; }
   details.cal { border:1px solid var(--rule); border-radius:6px; padding:8px 10px; }
   details.cal summary { cursor:pointer; font-weight:600; }
   details.cal ol { margin:6px 0; padding-left:18px; line-height:1.5; }
@@ -72,6 +76,18 @@
     <div id="auto"><span class="st">Click the map</span> to send it there,
       <b>shift-click</b> to go there and come back.
       <span class="k">Right-click, space or any drive key cancels.</span></div>
+    <div id="pathbox">
+      <button class="act" id="drawbtn" style="width:100%">&#9998; draw a path (P)</button>
+      <div class="ctl">
+        <span class="k">Click the map to add points; the purple curve is what it will drive.
+          <b>Backspace</b> undoes a point.</span>
+        <label><input type="checkbox" id="revback" checked> come back reversing
+          <span class="k">(no turn-around: cancels the wheels' turn slip)</span></label>
+        <div class="row"><button class="act" id="pathgo">drive it (Enter)</button>
+          <button class="act" id="pathback">drive it and come back</button></div>
+        <div class="row" style="margin-top:6px"><button class="act" id="pathclear">clear points</button></div>
+      </div>
+    </div>
     <div class="row">
       <button class="act" id="homebtn">&#8962; go home (H)</button>
       <button class="act" id="sethomebtn">set home here</button>
@@ -100,7 +116,7 @@
     </div>
     <div class="note">Hold <b>W A S D</b> or arrows to drive; let go to stop.
       <b>1 2 3</b> speed · <b>space</b> stop now · <b>Esc</b> e-stop (latched on the Pi) ·
-      <b>H</b> home.
+      <b>H</b> home · <b>P</b> draw a path.
       Leaving this tab stops the robot. Grid: 0.5 m. Trail = odometry.
       Click-to-go aims at where the robot <i>believes</i> that spot is.
       Map: black = seen solid, white = seen clear, red tint = too close for the robot's centre,
@@ -143,6 +159,9 @@ addEventListener('keydown', e => {
   else if (e.code === 'Escape') { held.clear(); post('/estop'); paintPad(); }
   else if (e.code === 'KeyR') { post('/reset'); }
   else if (e.code === 'KeyH') { goHome(); }
+  else if (e.code === 'KeyP') { setDrawing(!drawing); }
+  else if (drawing && e.code === 'Backspace') { e.preventDefault(); waypoints.pop(); draw(); }
+  else if (drawing && e.code === 'Enter') { e.preventDefault(); sendPath(false); }
   else if (/^Digit[1-9]$/.test(e.code)) { setGear(+e.code.slice(5) - 1); }
 });
 addEventListener('keyup', e => { const k = KEYS[e.code]; if (k) { held.delete(k); send(true); } });
@@ -184,6 +203,44 @@ function goHome() { held.clear(); paintPad(); command('/home'); }
 $('homebtn').onclick = goHome;
 $('sethomebtn').onclick = () => command('/sethome');
 $('calstart').onclick = () => command('/calib/start');
+function setDrawing(on) {
+  drawing = on; $('pathbox').classList.toggle('on', on);
+  $('drawbtn').innerHTML = on ? '&#10003; done drawing (P)' : '&#9998; draw a path (P)';
+  draw();
+}
+async function sendPath(comeBack) {
+  if (!waypoints.length) { autoErr = 'click the map to add points first'; return; }
+  held.clear(); paintPad();
+  await command('/path', {points: waypoints, come_back: comeBack, reverse_back: $('revback').checked});
+  if (!autoErr) { waypoints = []; setDrawing(false); }
+}
+$('drawbtn').onclick = () => setDrawing(!drawing);
+$('pathgo').onclick = () => sendPath(false);
+$('pathback').onclick = () => sendPath(true);
+$('pathclear').onclick = () => { waypoints = []; draw(); };
+// the same curve the robot will drive: centripetal Catmull-Rom through every point
+function curveThrough(pts, step = 0.04) {
+  const P = pts.filter((p, i) => i === 0 || Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > 1e-6);
+  if (P.length < 3) return P;
+  const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const E = [[2 * P[0][0] - P[1][0], 2 * P[0][1] - P[1][1]], ...P,
+             [2 * P.at(-1)[0] - P.at(-2)[0], 2 * P.at(-1)[1] - P.at(-2)[1]]];
+  const out = [P[0]];
+  for (let i = 1; i < E.length - 2; i++) {
+    const [p0, p1, p2, p3] = [E[i - 1], E[i], E[i + 1], E[i + 2]];
+    const t0 = 0, t1 = t0 + (Math.sqrt(d(p0, p1)) || 1e-6), t2 = t1 + (Math.sqrt(d(p1, p2)) || 1e-6),
+          t3 = t2 + (Math.sqrt(d(p2, p3)) || 1e-6);
+    const L = (a, b, ta, tb, t) => tb - ta < 1e-9 ? a :
+      [a[0] * (tb - t) / (tb - ta) + b[0] * (t - ta) / (tb - ta), a[1] * (tb - t) / (tb - ta) + b[1] * (t - ta) / (tb - ta)];
+    const n = Math.max(1, Math.floor(d(p1, p2) / step));
+    for (let k = 1; k <= n; k++) {
+      const t = t1 + (t2 - t1) * k / n;
+      const a1 = L(p0, p1, t0, t1, t), a2 = L(p1, p2, t1, t2, t), a3 = L(p2, p3, t2, t3, t);
+      out.push(L(L(a1, a2, t0, t2, t), L(a2, a3, t1, t3, t), t1, t2, t));
+    }
+  }
+  return out;
+}
 $('caldone').onclick = () => command('/calib/done', {turns: +$('calturns').value || 2});
 $('clearbtn').onclick = () => post('/clear');
 $('resetbtn').onclick = () => post('/reset');
@@ -191,6 +248,7 @@ $('resetbtn').onclick = () => post('/reset');
 // ---- the view: follows the robot, world x (start heading) points up
 const cv = $('cv'), cx = cv.getContext('2d');
 let view = null, autoErr = '';
+let drawing = false, waypoints = [];
 // ---- the map: deflated bytes, one per 5 cm cell, decoded once per version
 let mapImg = null, mapMeta = null, mapBusy = false;
 async function loadMap(m) {
@@ -268,6 +326,17 @@ function draw() {
     snap.route.forEach(([x, y], i) => i ? cx.lineTo(sx(x, y), sy(x, y)) : cx.moveTo(sx(x, y), sy(x, y)));
     cx.stroke(); cx.globalAlpha = 1;
   }
+  if (drawing || waypoints.length) {                 // the path being drawn
+    const pts = curveThrough([[rx, ry], ...waypoints]);
+    cx.strokeStyle = css('--trail'); cx.lineWidth = 2; cx.setLineDash([7, 5]); cx.beginPath();
+    pts.forEach(([x, y], i) => i ? cx.lineTo(sx(x, y), sy(x, y)) : cx.moveTo(sx(x, y), sy(x, y)));
+    cx.stroke(); cx.setLineDash([]);
+    cx.fillStyle = css('--trail'); cx.font = '600 11px ui-monospace,monospace';
+    waypoints.forEach(([x, y], i) => {
+      cx.beginPath(); cx.arc(sx(x, y), sy(x, y), 5, 0, 2 * Math.PI); cx.fill();
+      cx.fillText(String(i + 1), sx(x, y) + 8, sy(x, y) - 6);
+    });
+  }
   const a = snap.auto;
   if (a && a.goal) {
     const gx = sx(a.goal[0], a.goal[1]), gy = sy(a.goal[0], a.goal[1]);
@@ -288,6 +357,7 @@ cv.addEventListener('click', async e => {
   if (!view) return;
   const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
   const x = view.rx - (py - view.H / 2) / view.S, y = view.ry - (px - view.W / 2) / view.S;
+  if (drawing) { waypoints.push([x, y]); autoErr = ''; draw(); return; }
   held.clear(); paintPad();
   command('/goto', {x, y, round_trip: e.shiftKey});
 });
@@ -319,14 +389,17 @@ function paint() {
     box.innerHTML = `<span class="st err">Can't go:</span> ${autoErr}`;
   } else if (a.status === 'driving') {
     box.className = 'driving';
-    const how = a.avoiding ? (a.plan && a.plan.reason ? a.plan.reason : 'lidar: following the route')
-                           : 'no lidar: straight line, nothing stops it but you';
-    const where = a.leg === 'home' ? 'home' : `${a.goal[0].toFixed(2)}, ${a.goal[1].toFixed(2)}`;
+    const curve = a.leg === 'path' || a.leg === 'back';
+    const how = curve ? (a.plan && a.plan.reason ? a.plan.reason : 'pure pursuit along your path')
+      : a.avoiding ? (a.plan && a.plan.reason ? a.plan.reason : 'lidar: following the route')
+                   : 'no lidar: straight line, nothing stops it but you';
+    const where = a.leg === 'home' ? 'home' : a.leg === 'path' ? 'the end of your path'
+      : a.leg === 'back' ? 'the start, retracing the path' : `${a.goal[0].toFixed(2)}, ${a.goal[1].toFixed(2)}`;
     let what;
     if (a.phase === 'wait') what = `<span class="st">Arrived</span> (${a.detail}) · heading home in a moment`;
     else if (a.phase === 'face') what = `<span class="st">Turning</span> to face the way it started`;
     else what = `<span class="st">Driving</span> to ${where}` + (a.dist != null ? ` · ${a.dist.toFixed(2)} m to go` : '')
-               + (a.then_home ? ' · then home' : '');
+               + (a.then_home ? ' · then back' : '');
     box.innerHTML = what + `<br><span class="k">${how}</span>`;
   } else if (a.status) {
     box.className = a.status === 'arrived' || a.status === 'home' ? 'arrived' : a.status === 'gave up' ? 'gaveup' : '';
