@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Teleop</title>
+<style>
+  :root { --ground:#E9EAEC; --surface:#FCFCFD; --ink:#14171C; --soft:#757C86; --rule:#CACDD3;
+          --hot:#B45C09; --bad:#A11B1B; --ok:#196B4A; --pt:#17395F; --trail:#6A3FA0; --key:#DDE0E5;
+          --mono:ui-monospace,Menlo,monospace; }
+  @media (prefers-color-scheme: dark) { :root { --ground:#15171B; --surface:#1C1F24; --ink:#E9EBEE;
+          --soft:#79808B; --rule:#31373F; --hot:#F0A03C; --bad:#E8756A; --ok:#4FBF8B; --pt:#8FB4DC;
+          --trail:#C3A3EE; --key:#2A2F36; } }
+  * { box-sizing:border-box; } html,body { height:100%; margin:0; }
+  body { background:var(--ground); color:var(--ink); font-family:var(--mono); font-size:13px;
+         display:grid; grid-template-rows:auto 1fr; overflow:hidden; }
+  header { display:flex; flex-wrap:wrap; gap:6px 18px; align-items:baseline; padding:10px 16px;
+           background:var(--surface); border-bottom:1px solid var(--rule); }
+  h1 { font-size:17px; margin:0 6px 0 0; }
+  .k { color:var(--soft); } .v { font-variant-numeric:tabular-nums; }
+  .badge { padding:1px 7px; border-radius:3px; font-weight:600; }
+  .up { color:var(--ok); } .down { color:var(--bad); } .warn { color:var(--hot); }
+  .estop { background:var(--bad); color:#fff; }
+  main { display:grid; grid-template-columns:1fr 300px; min-height:0; }
+  @media (max-width:760px) { main { grid-template-columns:1fr; grid-template-rows:1fr auto; } }
+  .view { position:relative; min-height:0; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; }
+  aside { background:var(--surface); border-left:1px solid var(--rule); padding:14px; display:flex;
+          flex-direction:column; gap:14px; overflow:auto; }
+  .pad { display:grid; grid-template-columns:repeat(3,64px); grid-template-rows:repeat(2,64px); gap:6px;
+         justify-content:center; touch-action:none; user-select:none; -webkit-user-select:none; }
+  .pad button { font:inherit; font-size:18px; font-weight:600; border:1px solid var(--rule); border-radius:6px;
+                background:var(--key); color:var(--ink); }
+  .pad button.on { background:var(--ink); color:var(--surface); }
+  .pad .w { grid-column:2; } .pad .a { grid-column:1; grid-row:2; } .pad .s { grid-column:2; grid-row:2; }
+  .pad .d { grid-column:3; grid-row:2; }
+  .gears { display:flex; gap:6px; } .gears button { flex:1; }
+  button.act { font:inherit; padding:8px; border:1px solid var(--rule); border-radius:5px;
+               background:var(--key); color:var(--ink); cursor:pointer; }
+  button.act.sel { background:var(--ink); color:var(--surface); }
+  button.big { background:var(--bad); color:#fff; border:none; font-weight:700; font-size:15px; padding:12px; }
+  table { border-collapse:collapse; width:100%; } td { padding:2px 0; } td.v { text-align:right; }
+  .note { color:var(--soft); font-size:11.5px; line-height:1.5; }
+  #bubble { min-height:1.4em; }
+  .row { display:flex; gap:6px; } .row > * { flex:1; }
+</style></head>
+<body>
+<header>
+  <h1>Teleop</h1>
+  <span><span class="k">link </span><span id="link" class="v">…</span></span>
+  <span><span class="k">state </span><span id="rate" class="v">–</span></span>
+  <span id="flags"></span>
+  <span id="rec" class="k"></span>
+</header>
+<main>
+  <div class="view"><canvas id="cv"></canvas></div>
+  <aside>
+    <div class="pad" id="pad">
+      <button class="w" data-k="f">W</button><button class="a" data-k="l">A</button>
+      <button class="s" data-k="b">S</button><button class="d" data-k="r">D</button>
+    </div>
+    <div class="gears" id="gears"></div>
+    <table>
+      <tr><td class="k">asked</td><td class="v" id="cmd">–</td></tr>
+      <tr><td class="k">measured</td><td class="v" id="meas">–</td></tr>
+      <tr><td class="k">pose</td><td class="v" id="pose">–</td></tr>
+      <tr><td class="k">driven</td><td class="v" id="odo">–</td></tr>
+    </table>
+    <div id="bubble" class="warn"></div>
+    <button class="act big" id="estopbtn">E-STOP  (Esc)</button>
+    <div class="row">
+      <button class="act" id="clearbtn">clear e-stop</button>
+      <button class="act" id="resetbtn">reset pose (R)</button>
+    </div>
+    <div class="note">Hold <b>W A S D</b> or arrows to drive; let go to stop.
+      <b>1 2 3</b> speed · <b>space</b> stop now · <b>Esc</b> e-stop (latched on the Pi).
+      Leaving this tab stops the robot. Grid: 0.5 m. Trail = odometry.</div>
+  </aside>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const KEYS = {KeyW:'f', ArrowUp:'f', KeyS:'b', ArrowDown:'b', KeyA:'l', ArrowLeft:'l', KeyD:'r', ArrowRight:'r'};
+const held = new Set();
+let gear = 0, snap = null, lastSent = '';
+
+function post(path, body) {
+  return fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                      body: body ? JSON.stringify(body) : '{}', keepalive:true}).catch(() => {});
+}
+function vec() {
+  return [(held.has('f') ? 1 : 0) - (held.has('b') ? 1 : 0), (held.has('l') ? 1 : 0) - (held.has('r') ? 1 : 0)];
+}
+function send(force) {
+  const [fwd, turn] = vec();
+  const key = fwd + ',' + turn + ',' + gear;
+  // idle pages stay silent, so a second open tab never overrides the driver
+  if (!force && fwd === 0 && turn === 0 && lastSent === key) return;
+  lastSent = key;
+  post('/drive', {fwd, turn, gear});
+  paintPad();
+}
+setInterval(() => { if (held.size) send(true); }, 66);
+
+function release() { held.clear(); send(true); }
+function paintPad() {
+  document.querySelectorAll('#pad button').forEach(b => b.classList.toggle('on', held.has(b.dataset.k)));
+}
+addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = KEYS[e.code];
+  if (k) { e.preventDefault(); if (!e.repeat) { held.add(k); send(true); } return; }
+  if (e.code === 'Space') { e.preventDefault(); held.clear(); lastSent = ''; post('/halt'); paintPad(); }
+  else if (e.code === 'Escape') { held.clear(); post('/estop'); paintPad(); }
+  else if (e.code === 'KeyR') { post('/reset'); }
+  else if (/^Digit[1-9]$/.test(e.code)) { setGear(+e.code.slice(5) - 1); }
+});
+addEventListener('keyup', e => { const k = KEYS[e.code]; if (k) { held.delete(k); send(true); } });
+addEventListener('blur', release);
+document.addEventListener('visibilitychange', () => { if (document.hidden) release(); });
+
+document.querySelectorAll('#pad button').forEach(b => {
+  const on = e => { e.preventDefault(); b.setPointerCapture?.(e.pointerId); held.add(b.dataset.k); send(true); };
+  const off = e => { e.preventDefault(); held.delete(b.dataset.k); send(true); };
+  b.addEventListener('pointerdown', on);
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => b.addEventListener(ev, off));
+});
+function setGear(g) {
+  if (!snap || g < 0 || g >= snap.gears.length) return;
+  gear = g; send(true); paintGears();
+}
+function paintGears() {
+  const box = $('gears');
+  if (!snap) return;
+  if (box.children.length !== snap.gears.length) {
+    box.innerHTML = '';
+    snap.gears.forEach((g, i) => {
+      const b = document.createElement('button');
+      b.className = 'act'; b.textContent = (i + 1) + ' · ' + g[0].toFixed(2) + ' m/s';
+      b.onclick = () => setGear(i); box.appendChild(b);
+    });
+  }
+  [...box.children].forEach((b, i) => b.classList.toggle('sel', i === gear));
+}
+$('estopbtn').onclick = () => { held.clear(); post('/estop'); };
+$('clearbtn').onclick = () => post('/clear');
+$('resetbtn').onclick = () => post('/reset');
+
+// ---- the view: follows the robot, world x (start heading) points up
+const cv = $('cv'), cx = cv.getContext('2d');
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function draw() {
+  const dpr = devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cx.clearRect(0, 0, W, H);
+  if (!snap) return;
+  const [rx, ry, th] = snap.pose, S = Math.min(W, H) / 6;          // 6 m across
+  const sx = (x, y) => W / 2 - (y - ry) * S, sy = (x, y) => H / 2 - (x - rx) * S;
+  cx.strokeStyle = css('--rule'); cx.lineWidth = 1; cx.beginPath();
+  for (let g = Math.floor((rx - 6) * 2) / 2; g <= rx + 6; g += 0.5) { cx.moveTo(0, sy(g, 0)); cx.lineTo(W, sy(g, 0)); }
+  for (let g = Math.floor((ry - 6) * 2) / 2; g <= ry + 6; g += 0.5) { cx.moveTo(sx(0, g), 0); cx.lineTo(sx(0, g), H); }
+  cx.stroke();
+  cx.strokeStyle = css('--trail'); cx.lineWidth = 2; cx.beginPath();
+  snap.trail.forEach(([x, y], i) => i ? cx.lineTo(sx(x, y), sy(x, y)) : cx.moveTo(sx(x, y), sy(x, y)));
+  cx.stroke();
+  if (snap.scan) {
+    const c = Math.cos(th), s = Math.sin(th);
+    for (const [bx, by, near] of snap.scan.pts) {
+      const wx = rx + bx * c - by * s, wy = ry + bx * s + by * c;
+      cx.fillStyle = near ? css('--bad') : css('--pt');
+      cx.fillRect(sx(wx, wy) - 2, sy(wx, wy) - 2, 4, 4);
+    }
+  }
+  // robot footprint (front, rear, half width) and heading
+  const [fr, re, hw] = snap.footprint, c = Math.cos(th), s = Math.sin(th);
+  const corner = (bx, by) => [sx(rx + bx * c - by * s, ry + bx * s + by * c), sy(rx + bx * c - by * s, ry + bx * s + by * c)];
+  cx.strokeStyle = css('--ink'); cx.lineWidth = 2; cx.beginPath();
+  [[fr, hw], [fr, -hw], [-re, -hw], [-re, hw], [fr, hw]].forEach(([a, b], i) => { const [px, py] = corner(a, b); i ? cx.lineTo(px, py) : cx.moveTo(px, py); });
+  cx.stroke();
+  const [nx, ny] = corner(fr + 0.12, 0), [ox, oy] = corner(0, 0);
+  cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(nx, ny); cx.stroke();
+}
+
+function fmt(n, d = 2) { return (n >= 0 ? ' ' : '') + n.toFixed(d); }
+function paint() {
+  const s = snap;
+  const link = $('link');
+  link.textContent = s.link === 'up' ? 'up' : s.link + (s.link_detail ? ' — ' + s.link_detail : '');
+  link.className = 'v ' + (s.link === 'up' ? 'up' : 'down');
+  $('rate').textContent = s.state_age_ms == null ? '–' : `${s.state_hz} Hz, ${s.state_age_ms} ms old`;
+  const f = [];
+  if (s.estop) f.push('<span class="badge estop">E-STOP LATCHED</span>');
+  if (s.watchdog && s.link === 'up') f.push('<span class="badge down">watchdog tripped</span>');
+  $('flags').innerHTML = f.join(' ');
+  $('rec').textContent = s.recording ? `● recording ${s.recording.lines} lines → ${s.recording.path}` : '';
+  $('cmd').textContent = `${fmt(s.cmd[0])} m/s ${fmt(s.cmd[1])} rad/s`;
+  $('meas').textContent = `${fmt(s.meas[0])} m/s ${fmt(s.meas[1])} rad/s`;
+  $('pose').textContent = `${fmt(s.pose[0])}, ${fmt(s.pose[1])} m ${fmt(s.pose[2] * 180 / Math.PI, 0)}°`;
+  $('odo').textContent = `${s.odometer_m.toFixed(2)} m`;
+  const b = s.bubble;
+  $('bubble').textContent = !b ? (s.scan ? '' : 'no lidar on the Pi: nothing stops it but you')
+    : b.state === 'clear' ? '' : `lidar bubble ${b.state}: ${b.reason}`;
+  if (gear !== s.gear && !held.size) gear = s.gear;
+  paintGears();
+  draw();
+}
+function connect() {
+  const es = new EventSource('/stream');
+  es.onmessage = e => { snap = JSON.parse(e.data); paint(); };
+  es.onerror = () => { $('link').textContent = 'teleop server gone'; $('link').className = 'v down'; };
+}
+addEventListener('resize', draw);
+connect();
+</script>
+</body></html>
