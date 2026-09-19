@@ -112,9 +112,13 @@ class BridgeCore:
         estop_input: Callable[[], bool] | None = None,
         lidar: Any = None,
         bubble: Any = None,
+        imu: Any = None,
     ) -> None:
         """lidar: a LidarSource (bridge/lidar.py) on the SAME clock as `now`;
-        bubble: a SafetyBubble, default settings if None. No lidar, no bubble."""
+        bubble: a SafetyBubble, default settings if None. No lidar, no bubble.
+        imu: anything with yaw() -> radians or None (bridge/imu.D435iImu): its
+        heading goes to subscribed clients. If it has `wheels_still`, that is
+        pointed at this core, so the gyro only learns its bias while stopped."""
         for name, value in (
             ("timeout_s", timeout_s),
             ("motion_timeout_s", motion_timeout_s),
@@ -125,6 +129,9 @@ class BridgeCore:
         if not isinstance(driver, HardwareDriver):
             raise TypeError(f"{type(driver).__name__} does not implement HardwareDriver")
         self.driver = driver
+        self.imu = imu
+        if imu is not None and hasattr(imu, "wheels_still"):
+            imu.wheels_still = lambda: self._wheels == (0.0, 0.0)
         self.estop_input = estop_input  # True while a physical e-stop is pressed
         self.lidar = lidar
         if lidar is not None and bubble is None:
@@ -317,6 +324,14 @@ class BridgeCore:
                 "nearest_m": None if d.nearest_m is None else round(d.nearest_m, 3),
                 "stop_m": round(d.stop_m, 3),
             }
+        if extended and self.imu is not None:
+            try:
+                yaw = self.imu.yaw()
+            except Exception as exc:  # a gyro fault must not stop the state stream
+                logger.warning("gyro read failed: %s", exc)
+                yaw = None
+            if yaw is not None and math.isfinite(yaw):
+                ext["yaw"] = round(float(yaw), 6)
         return State(
             seq=self.last_seq,
             t=now,
@@ -427,6 +442,7 @@ class BridgeServer:
         lidar: Any = None,
         bubble: Any = None,
         scan_hz: float = 5.0,
+        imu: Any = None,
     ) -> None:
         """estop_input: polled every tick (so at state_hz) and before every act;
         return True while a physical e-stop is pressed. Called on the loop
@@ -451,6 +467,7 @@ class BridgeServer:
             estop_input=estop_input,
             lidar=lidar,
             bubble=bubble,
+            imu=imu,
         )
         self._sub: Subscribe | None = None      # what the current client asked for
         self._scan_sent: Any = None
@@ -510,6 +527,11 @@ class BridgeServer:
                 self.core.lidar.close()         # the lidar motor stops with the bridge
             except Exception as exc:
                 logger.error("lidar close failed: %s", exc)
+        if self.core.imu is not None and hasattr(self.core.imu, "close"):
+            try:
+                self.core.imu.close()           # powers the gyro down
+            except Exception as exc:
+                logger.error("gyro close failed: %s", exc)
         logger.info("bridge closed; motors stopped")
 
     def trigger_estop(self, reason: str = "local estop") -> None:

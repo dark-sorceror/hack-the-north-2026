@@ -52,9 +52,15 @@ class TankOdometry:
     counts_per_rev: int = 4096
     pose: Pose = field(default_factory=Pose)
     distance_travelled_m: float = 0.0  # path length of the base centre; survives reset()
+    # With a gyro: how much turning the wheels claimed vs what the gyro measured,
+    # over the same steps. Their ratio is the skid-steer's slip, live.
+    turn_wheels_rad: float = 0.0
+    turn_gyro_rad: float = 0.0
+    heading_source: str = "wheels"
     _last_ticks: tuple[int, int] | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _last_heading: float | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.counts_per_rev <= 0:
@@ -64,14 +70,23 @@ class TankOdometry:
         """Re-seed the pose (e.g. from an AprilTag fix); the next update only records ticks."""
         self.pose = pose
         self._last_ticks = None
+        self._last_heading = None
 
-    def update(self, left_ticks: int, right_ticks: int, dt: float) -> Pose:
+    def update(self, left_ticks: int, right_ticks: int, dt: float,
+               heading: float | None = None) -> Pose:
         """Fold in an encoder reading taken `dt` seconds after the previous one.
 
         The first reading after construction or reset() only records where the ticks are.
+
+        heading: a gyro's heading (radians, CCW, any zero). When given, the step's
+        turn is the gyro's change in heading, not the wheels' guess: distance from
+        the wheels, rotation from the gyro. A step without one falls back to the
+        wheels, and the next one only re-seeds the gyro (its change over the gap was
+        already counted by the wheels).
         """
         if self._last_ticks is None:
             self._last_ticks = (left_ticks, right_ticks)
+            self._last_heading = heading
             return self.pose
         # Checked before any state changes, so the next good reading still covers this motion.
         if not dt > 0.0:
@@ -81,6 +96,16 @@ class TankOdometry:
         d_left = unwrap_ticks(left_ticks, last_left, self.counts_per_rev) * metres_per_tick
         d_right = unwrap_ticks(right_ticks, last_right, self.counts_per_rev) * metres_per_tick
         vx, wz = tank_wheels_to_body(d_left / dt, d_right / dt, self.geo)
+        if heading is not None and self._last_heading is not None:
+            gyro_dth = math.remainder(heading - self._last_heading, TAU)
+            if abs(wz * dt) > 1e-4 or abs(gyro_dth) > 1e-4:
+                self.turn_wheels_rad += abs(wz * dt)
+                self.turn_gyro_rad += abs(gyro_dth)
+            wz = gyro_dth / dt
+            self.heading_source = "gyro"
+        else:
+            self.heading_source = "wheels"
+        self._last_heading = heading
         self.pose = integrate_twist(self.pose, vx, 0.0, wz, dt)
         self.distance_travelled_m += abs(vx * dt)
         self._last_ticks = (left_ticks, right_ticks)
