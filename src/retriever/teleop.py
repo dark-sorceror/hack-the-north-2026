@@ -26,6 +26,15 @@ of the bridge, so it cannot drive into something the bubble can see.
 
 A (turn left) always turns the nose left, reversing or not: a tank, not a car.
 
+CLICK TO GO. Click the map and the robot drives itself to that spot, through
+the goto controllers in navigation/drive.py: straight at it without a lidar,
+steering round what the lidar sees with one (navigation/avoid.py). The human
+always wins: any drive key takes over, space or Esc stops it, and it only
+drives itself while the page is open (close the tab and it stops). The goal is
+in the odometry frame the page draws, so "there" means where the robot BELIEVES
+that spot is: good for a few metres, drifting with every slipped turn until the
+gyro and the map land. 1/2/3 set its top speed too.
+
 Stdlib only, like the Pi side, so it also runs on a Pi or any bare python3.
 """
 
@@ -41,6 +50,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+from retriever.navigation.avoid import AvoidConfig, bridge_scan_source
+from retriever.navigation.drive import AvoidingGotoController, DifferentialGotoController, Limits
 from retriever.types import Action, Pose
 
 PAGE_PATH = Path(__file__).with_name("teleop.html")
@@ -133,11 +144,13 @@ class TeleopCore:
         wz = self.turn * w * (c.arc_turn_scale if self.fwd else 1.0)
         return vx, wz
 
-    def step(self, now: float) -> Action:
+    def step(self, now: float, target: tuple[float, float] | None = None) -> Action:
+        """The next Action. `target` (vx, wz) replaces what the keys ask for:
+        click-to-go drives through the same ramps."""
         c = self.config
         dt = 0.0 if self._last_step is None else min(max(0.0, now - self._last_step), 0.2)
         self._last_step = now
-        tvx, twz = self.target(now)
+        tvx, twz = self.target(now) if target is None else target
         self.vx = _approach(self.vx, tvx, c.accel_mps2, c.decel_mps2, dt)
         self.wz = _approach(self.wz, twz, c.ang_accel, c.ang_decel, dt)
         return Action(base_vx=self.vx, base_wz=self.wz)
@@ -177,6 +190,24 @@ class DriveRecorder:
 
 
 # ------------------------------------------------------------------ session
+
+
+ARRIVE_M = 0.08          # click-to-go is done this close to the spot (position only)
+MAX_GOAL_M = 15.0        # a click further than this is a mis-click
+VIEWER_GRACE_S = 1.0     # page closed this long -> click-to-go stops
+
+
+@dataclass
+class _Auto:
+    """One click-to-go trip."""
+
+    goal: Pose
+    ctl: Any                  # DifferentialGotoController or AvoidingGotoController
+    robot: Any                # the link it started on; a reconnect ends the trip
+    started: float            # time.monotonic()
+    timeout_s: float
+    avoiding: bool            # steering round what the lidar sees
+    dist: float | None = None
 
 
 @dataclass
@@ -226,6 +257,14 @@ class TeleopSession:
         self._window: deque[tuple[float, Pose]] = deque()
         self._last_cmd = Action()
         self._threads: list[threading.Thread] = []
+        self._obs: Any = None                  # the latest Observation, for click-to-go
+        self.auto: _Auto | None = None
+        self.auto_status = ""                  # driving | arrived | gave up | stopped
+        self.auto_detail = ""
+        # None: nobody counts viewers (tests, scripts). serve() sets 0, and from
+        # then on click-to-go only drives while at least one page is watching.
+        self.viewers: int | None = None
+        self._viewers_gone: float | None = None
 
     # -- lifecycle --------------------------------------------------------
 
@@ -266,10 +305,13 @@ class TeleopSession:
     def drive(self, fwd: float, turn: float, gear: int | None = None) -> None:
         with self._lock:
             self.core.command(fwd, turn, self.clock(), gear)
+            if self.auto is not None and (self.core.fwd or self.core.turn):
+                self._end_auto("stopped", "you took over")
 
     def halt(self) -> None:
         with self._lock:
             self.core.halt()
+            self._end_auto("stopped", "stopped")
         self._send(Action())
 
     def estop(self) -> None:
@@ -278,12 +320,104 @@ class TeleopSession:
         if robot is not None:
             robot.estop("teleop page")
 
+    def goto(self, x: float, y: float) -> None:
+        """Click-to-go: drive to (x, y) in the odometry frame. Raises
+        RuntimeError (said to the page as is) when it can't start."""
+        gx, gy = float(x), float(y)
+        if not (math.isfinite(gx) and math.isfinite(gy)):
+            raise ValueError("x and y must be finite numbers")
+        robot = self.robot
+        if robot is None or self.link != "up":
+            raise RuntimeError("not connected to the robot")
+        if getattr(robot, "estopped", False):
+            raise RuntimeError("the e-stop is latched: clear it first")
+        with self._lock:
+            pose = self._seen.pose
+            d = math.hypot(gx - pose.x, gy - pose.y)
+            if d > MAX_GOAL_M:
+                raise RuntimeError(f"that's {d:.0f} m away; click closer than {MAX_GOAL_M:.0f} m")
+            v, w = self.core.config.gears[self.core.gear]
+            limits = Limits(v_max=v, w_max=w, pos_tol=ARRIVE_M)
+            lidar = (getattr(robot, "scan", None) is not None
+                     or getattr(robot, "bubble", None) is not None)
+            if lidar:
+                config = AvoidConfig.for_footprint(*self.footprint)
+                ctl: Any = AvoidingGotoController(bridge_scan_source(robot), limits, config)
+            else:
+                ctl = DifferentialGotoController(limits)
+            # Heading = the way it will be going: arriving needs no final turn.
+            goal = Pose(gx, gy, math.atan2(gy - pose.y, gx - pose.x))
+            self.auto = _Auto(goal, ctl, robot, time.monotonic(),
+                              timeout_s=max(20.0, 10.0 + 4.0 * d / v), avoiding=lidar, dist=d)
+            self.core.fwd = self.core.turn = 0.0     # no key target underneath it
+            self.core._heard = None
+            self.auto_status, self.auto_detail = "driving", ""
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._end_auto("stopped", "cancelled")
+
+    def viewer(self, joined: bool) -> None:
+        """A page opened (True) or closed (False) its live stream."""
+        with self._lock:
+            n = max(0, (self.viewers or 0) + (1 if joined else -1))
+            self.viewers = n
+            self._viewers_gone = None if n else time.monotonic()
+
+    def _end_auto(self, status: str, detail: str) -> None:
+        """Under self._lock."""
+        if self.auto is None:
+            return
+        self.auto = None
+        self.auto_status, self.auto_detail = status, detail
+
+    def _auto_target(self) -> tuple[float, float] | None:
+        """This tick's (vx, wz) for click-to-go, or None: the keys drive.
+        Under self._lock."""
+        a = self.auto
+        if a is None:
+            return None
+        now = time.monotonic()
+        if self.robot is not a.robot:
+            self._end_auto("stopped", "lost the link to the robot")
+            return None
+        if (self.viewers is not None and self._viewers_gone is not None
+                and now - self._viewers_gone > VIEWER_GRACE_S):
+            self._end_auto("stopped", "nobody is watching the page")
+            return None
+        if now - a.started > a.timeout_s:
+            self._end_auto("gave up", f"I didn't get there in {a.timeout_s:.0f} s")
+            return None
+        obs = self._obs
+        if obs is None or now - self._seen.rx > 0.5:
+            return 0.0, 0.0                             # no fresh state: hold still
+        p = obs.base
+        a.dist = math.hypot(a.goal.x - p.x, a.goal.y - p.y)
+        if a.dist <= ARRIVE_M:
+            self._end_auto("arrived", f"{a.dist * 100:.0f} cm from the spot")
+            return None
+        step_observation = getattr(a.ctl, "step_observation", None)
+        if step_observation is not None:
+            action, done = step_observation(obs, a.goal)
+        else:
+            action, done = a.ctl.step(p, a.goal)
+        failure = getattr(a.ctl, "failure", None)
+        if failure is not None:
+            self._end_auto("gave up", failure[0])
+            return None
+        if done:
+            self._end_auto("arrived", f"{a.dist * 100:.0f} cm from the spot")
+            return None
+        return action.base_vx, action.base_wz
+
     def clear_estop(self) -> None:
         robot = self.robot
         if robot is not None:
             robot.clear_estop()
 
     def reset_pose(self) -> None:
+        with self._lock:
+            self._end_auto("stopped", "the pose was reset")
         robot = self.robot
         if robot is not None:
             robot.reset_pose(Pose())
@@ -319,6 +453,7 @@ class TeleopSession:
                 return
             self.robot = None
             self.core.halt()
+            self._end_auto("stopped", "lost the link to the robot")
             self.link, self.link_detail = "down", why
         try:
             robot.close()
@@ -341,7 +476,12 @@ class TeleopSession:
         next_t = time.monotonic()
         while not self._closed.is_set():
             with self._lock:
-                action = self.core.step(self.clock())
+                try:
+                    target = self._auto_target()
+                except Exception as exc:   # a controller bug must not kill the control loop
+                    self._end_auto("gave up", f"navigation error: {exc}")
+                    target = None
+                action = self.core.step(self.clock(), target)
             self._send(action)
             next_t += period
             delay = next_t - time.monotonic()
@@ -372,6 +512,7 @@ class TeleopSession:
             if s.states and now > s.rx:
                 s.rate_hz = 0.9 * s.rate_hz + 0.1 / (now - s.rx) if s.rate_hz else 1.0 / (now - s.rx)
             s.t, s.rx, s.states = obs.t, now, s.states + 1
+            self._obs = obs
             p = obs.base
             s.odometer_m += math.hypot(p.x - s.pose.x, p.y - s.pose.y) if s.states > 1 else 0.0
             s.pose = p
@@ -438,6 +579,17 @@ class TeleopSession:
                 "recording": None if self.recorder is None else {
                     "path": str(self.recorder.path), "lines": self.recorder.lines},
             }
+            a = self.auto
+            plan = getattr(a.ctl, "plan", None) if a is not None else None
+            snap["auto"] = {
+                "status": "driving" if a is not None else self.auto_status,
+                "detail": self.auto_detail,
+                "goal": None if a is None else [round(a.goal.x, 3), round(a.goal.y, 3)],
+                "dist": None if a is None or a.dist is None else round(a.dist, 2),
+                "avoiding": bool(a is not None and a.avoiding),
+                "plan": None if plan is None else {
+                    k: plan.as_dict()[k] for k in ("status", "reason", "steer_deg", "speed")},
+            }
         snap["estop"] = bool(robot is not None and robot.estopped)
         snap["watchdog"] = bool(robot is not None and robot.watchdog_tripped)
         bubble = getattr(robot, "bubble", None) if robot is not None else None
@@ -488,11 +640,18 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                     session.clear_estop()
                 elif self.path == "/reset":
                     session.reset_pose()
+                elif self.path == "/goto":
+                    session.goto(body["x"], body["y"])
+                elif self.path == "/cancel":
+                    session.cancel()
                 else:
                     self._reply(404, b'{"error":"no such command"}')
                     return
-            except (ValueError, TypeError) as exc:
+            except (ValueError, TypeError, KeyError) as exc:
                 self._reply(400, json.dumps({"error": str(exc)}).encode())
+                return
+            except RuntimeError as exc:  # can't do that right now, and here's why
+                self._reply(409, json.dumps({"error": str(exc)}).encode())
                 return
             except Exception as exc:  # the robot refused (e.g. link down mid-call)
                 self._reply(503, json.dumps({"error": str(exc)}).encode())
@@ -511,6 +670,7 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                 self.send_header("Connection", "close")
                 self.end_headers()
                 self.close_connection = True
+                session.viewer(True)
                 try:
                     while not session._closed.is_set():
                         data = json.dumps(session.snapshot(), separators=(",", ":"))
@@ -519,6 +679,8 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                         session._closed.wait(0.1)
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     return
+                finally:
+                    session.viewer(False)
             else:
                 self._reply(404, b'{"error":"not found"}')
 
@@ -529,5 +691,9 @@ def serve(session: TeleopSession, host: str = "127.0.0.1", port: int = 8791) -> 
     """Start the page's HTTP server in a daemon thread; returns it (.server_port)."""
     httpd = ThreadingHTTPServer((host, port), make_handler(session))
     httpd.daemon_threads = True
+    with session._lock:                  # from now on, click-to-go needs a page watching
+        if session.viewers is None:
+            session.viewers = 0
+            session._viewers_gone = time.monotonic()
     threading.Thread(target=httpd.serve_forever, name="teleop-http", daemon=True).start()
     return httpd

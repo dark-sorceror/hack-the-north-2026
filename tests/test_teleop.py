@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from retriever.bridge.client import BridgeRobot
 from retriever.bridge.fake_driver import FakeTankDriver
+from retriever.bridge.lidar import FakeLidar, FakeTankPose, FakeWorld
 from retriever.bridge.server import BridgeServer, ServerThread
 from retriever.teleop import (
     DriveRecorder,
@@ -236,6 +237,122 @@ class TestSession(BridgeCase):
         self.assertIsNot(s.robot, robot)
 
 
+def wait_done(s, timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while s.auto is not None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return s.snapshot()
+
+
+class TestClickToGo(BridgeCase):
+    def test_drives_to_a_clicked_spot_and_stops_there(self):
+        s = self.session()
+        s.core.gear = 2
+        s.goto(0.6, 0.0)
+        snap = wait_done(s)
+        self.assertEqual(snap["auto"]["status"], "arrived", snap["auto"])
+        x, y, _ = snap["pose"]
+        self.assertAlmostEqual(x, 0.6, delta=0.1)
+        self.assertAlmostEqual(y, 0.0, delta=0.05)
+        time.sleep(0.5)                                   # ramped down, not coasting on
+        self.assertEqual(self.wheels(), (0.0, 0.0))
+        self.assertIsNone(s.snapshot()["auto"]["goal"])
+
+    def test_turns_round_for_a_spot_behind_and_to_the_left(self):
+        s = self.session()
+        s.core.gear = 2
+        s.goto(-0.3, 0.4)
+        snap = wait_done(s)
+        self.assertEqual(snap["auto"]["status"], "arrived", snap["auto"])
+        self.assertLess(math.hypot(snap["pose"][0] + 0.3, snap["pose"][1] - 0.4), 0.12)
+
+    def test_a_drive_key_takes_over_but_letting_go_does_not(self):
+        s = self.session()
+        s.goto(2.0, 0.0)
+        time.sleep(0.3)
+        s.drive(0, 0, 1)                                  # a release / gear change: keeps going
+        self.assertIsNotNone(s.auto)
+        s.drive(0, 1)                                     # a key: the human has it
+        self.assertIsNone(s.auto)
+        self.assertEqual(s.snapshot()["auto"]["detail"], "you took over")
+
+    def test_space_and_cancel_stop_it(self):
+        s = self.session()
+        s.goto(2.0, 0.0)
+        s.halt()
+        self.assertIsNone(s.auto)
+        s.goto(2.0, 0.0)
+        s.cancel()
+        self.assertIsNone(s.auto)
+
+    def test_refuses_while_estopped_and_mis_clicks(self):
+        s = self.session()
+        with self.assertRaises(RuntimeError):
+            s.goto(100.0, 0.0)
+        s.estop()
+        deadline = time.monotonic() + 2.0
+        while not s.snapshot()["estop"] and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with self.assertRaisesRegex(RuntimeError, "e-stop"):
+            s.goto(1.0, 0.0)
+        with self.assertRaises(ValueError):
+            s.goto(float("nan"), 0.0)
+
+    def test_stops_when_nobody_is_watching(self):
+        s = self.session()
+        s.viewers, s._viewers_gone = 0, time.monotonic()    # what serve() does
+        s.goto(3.0, 0.0)
+        snap = wait_done(s, 3.0)
+        self.assertEqual(snap["auto"]["detail"], "nobody is watching the page")
+
+    def test_goes_on_while_a_page_watches(self):
+        s = self.session()
+        s.viewers = 0
+        s.viewer(True)
+        s.goto(3.0, 0.0)
+        time.sleep(1.5)
+        self.assertIsNotNone(s.auto)
+        s.viewer(False)
+        snap = wait_done(s, 3.0)
+        self.assertEqual(snap["auto"]["detail"], "nobody is watching the page")
+
+
+class TestClickToGoRoundAPost(unittest.TestCase):
+    """With a lidar on the Pi, the path bends round what is in the way."""
+
+    POST = (0.8, 0.0, 0.08)
+
+    def setUp(self):
+        self.drv = FakeTankDriver()
+        world = FakeWorld.room(posts=[self.POST])
+        lidar = FakeLidar(world, pose_fn=FakeTankPose(self.drv), noise_m=0.005)
+        self.server = BridgeServer(self.drv, "127.0.0.1", 0, timeout_ms=300,
+                                   motion_timeout_ms=500, state_hz=50.0, lidar=lidar)
+        self.st = ServerThread(self.server)
+        self.port = self.st.start()
+        self.addCleanup(self.st.stop)
+
+    def test_steers_round_a_post_to_the_spot_behind_it(self):
+        s = TeleopSession(lambda: BridgeRobot("127.0.0.1", self.port)).start()
+        self.addCleanup(s.close)
+        self.assertTrue(s.wait_connected(3.0))
+        deadline = time.monotonic() + 3.0
+        while s.robot.scan is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        s.core.gear = 2
+        s.goto(1.7, 0.0)
+        self.assertTrue(s.auto.avoiding)
+        closest, deadline = 9.0, time.monotonic() + 30.0
+        while s.auto is not None and time.monotonic() < deadline:
+            x, y, _ = s.snapshot()["pose"]
+            closest = min(closest, math.hypot(x - self.POST[0], y - self.POST[1]))
+            time.sleep(0.05)
+        snap = s.snapshot()
+        self.assertEqual(snap["auto"]["status"], "arrived", snap["auto"])
+        # the base centre stayed a half-width plus the post's radius away: no contact
+        self.assertGreater(closest, 0.20 + self.POST[2])
+
+
 class TestHttp(BridgeCase):
     def setUp(self):
         super().setUp()
@@ -266,6 +383,14 @@ class TestHttp(BridgeCase):
         self.assertEqual(self.post("/drive", {"fwd": "fast"}), 400)
         self.assertEqual(self.post("/nope", {}), 404)
         self.assertEqual(self.post("/halt", {}), 204)
+
+    def test_goto_and_cancel(self):
+        self.assertEqual(self.post("/goto", {"x": 0.5, "y": 0.0}), 204)
+        self.assertIsNotNone(self.s.auto)
+        self.assertEqual(self.post("/cancel", {}), 204)
+        self.assertIsNone(self.s.auto)
+        self.assertEqual(self.post("/goto", {"x": 0.5}), 400)
+        self.assertEqual(self.post("/goto", {"x": 500, "y": 0}), 409)
 
 
 if __name__ == "__main__":
