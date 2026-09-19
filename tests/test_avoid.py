@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from retriever.backends.tank import TankFakeRobot
 from retriever.navigation.avoid import (
     BLOCKED,
     CLEAR,
@@ -30,7 +31,12 @@ from retriever.navigation.avoid import (
     scan_from_lidar_scan,
     scan_from_rplidar,
 )
-from retriever.navigation.drive import Limits
+from retriever.navigation.drive import (
+    AvoidingGotoController,
+    DifferentialGotoController,
+    Limits,
+    run_goto,
+)
 from retriever.navigation.simscan import (
     Circle,
     SimLidar,
@@ -41,7 +47,7 @@ from retriever.navigation.simscan import (
     wall,
     wheels,
 )
-from retriever.types import Pose
+from retriever.types import Action, Pose
 
 DEG = math.pi / 180
 ROOM = room(-2.0, -2.5, 4.5, 2.5)
@@ -55,6 +61,41 @@ def scan_from(world, pose=Pose(), mount=Mount(), seed=0, sweeps=3, **kw) -> Scan
     scans = [lid.scan_at(pose) for _ in range(sweeps)]
     pts = tuple(p for s in scans for p in s.points)
     return Scan(0.0, pts, scans[0].ray_step_rad / sweeps, scans[0].blind)
+
+
+def clearance(p: Pose, shapes) -> float:
+    """Distance from the robot centre to the nearest shape surface."""
+    best = math.inf
+    for s in shapes:
+        if isinstance(s, Circle):
+            best = min(best, math.hypot(p.x - s.x, p.y - s.y) - s.r)
+        else:
+            ex, ey = s.x1 - s.x0, s.y1 - s.y0
+            u = max(0.0, min(1.0, ((p.x - s.x0) * ex + (p.y - s.y0) * ey) / (ex * ex + ey * ey)))
+            best = min(best, math.hypot(p.x - (s.x0 + u * ex), p.y - (s.y0 + u * ey)))
+    return best
+
+
+def drive(obstacles, goal: Pose, start: Pose = Pose(), seed: int = 0, config=CFG,
+          mount=Mount(), timeout_s: float = 40.0):
+    """run_goto with the avoiding controller in ROOM + obstacles. Returns the
+    result, the TRUE path, the controller, and every action sent."""
+    bot = TankFakeRobot()
+    bot._world._base = start        # where it really is...
+    bot._odometry.pose = start      # ...and where its odometry believes it is
+    lidar = SimLidar.on(bot, ROOM + list(obstacles), mount=mount, seed=seed)
+    ctl = AvoidingGotoController(lidar, Limits(), config)
+    path, actions = [], []
+    act = bot.act
+
+    def spy(a):
+        actions.append(a)
+        act(a)
+
+    bot.act = spy
+    r = run_goto(bot, goal, Limits(), timeout_s=timeout_s, controller=ctl,
+                 on_tick=lambda obs, a, t: path.append(bot.base))
+    return r, path, ctl, actions
 
 
 # ------------------------------------------------------------------ signs
@@ -134,6 +175,13 @@ class TestObstacleOnTheLeftSteersRight(unittest.TestCase):
                 right = LocalPlanner().plan(scan_from(ROOM + [Circle(1.0, -0.25, 0.1)], mount=m),
                                             0.0, 3.0)
                 self.assertGreater(right.steer_rad, 0.0, right.reason)
+
+    def test_end_to_end_with_an_upside_down_lidar(self):
+        post = [Circle(1.4, 0.2, 0.12)]
+        r, path, _, _ = drive(post, Pose(3.0, 0.0, 0.0), mount=Mount(inverted=True))
+        self.assertTrue(r.ok, r.detail)
+        self.assertLess(min(p.y for p in path), -0.2)     # went round on the RIGHT
+        self.assertGreater(min(clearance(p, post) for p in path), CFG.radius_m)
 
 
 # ------------------------------------------------------------------ planner
@@ -353,6 +401,144 @@ class TestScanPlumbing(unittest.TestCase):
         s = scan_from_rplidar(0.0, [(0.0, 1.0), (1.0, 0.0), (2.0, 0.1), (3.0, 20.0)])
         self.assertEqual(len(s.points), 1)                   # 0, too near, too far dropped
         self.assertAlmostEqual(s.ray_step_rad, 2 * math.pi / 4)
+
+
+# ------------------------------------------------------------------ end to end
+
+
+class TestDriving(unittest.TestCase):
+    """TankFakeRobot: odometry from wrapping encoder ticks, no strafing. The
+    lidar sees the TRUE pose; the controller only knows the odometry."""
+
+    def assertKeptClear(self, path, shapes, margin=CFG.radius_m):
+        self.assertGreater(min(clearance(p, shapes) for p in path), margin)
+
+    def test_a_box_between_robot_and_goal_is_steered_round_and_reached(self):
+        b = box(1.5, 0.0, 0.4, 0.4)
+        r, path, _, _ = drive(b, Pose(3.0, 0.0, 0.0))
+        self.assertTrue(r.ok, r.detail)
+        self.assertGreater(max(abs(p.y) for p in path), 0.4)   # it really went round
+        self.assertKeptClear(path, b)
+
+    def test_60_percent_dropouts_do_not_break_it(self):
+        b = box(1.5, 0.1, 0.4, 0.4)
+        for seed in range(1, 5):
+            with self.subTest(seed=seed):
+                r, path, _, _ = drive(b, Pose(3.0, 0.0, 0.0), seed=seed)
+                self.assertTrue(r.ok, r.detail)
+                self.assertKeptClear(path, b)
+
+    def test_a_chair_is_four_thin_legs_and_still_goes_round(self):
+        c = chair(1.5, 0.05)
+        r, path, _, _ = drive(c, Pose(3.0, 0.0, 0.0))
+        self.assertTrue(r.ok, r.detail)
+        self.assertKeptClear(path, c)
+
+    def test_a_corridor_is_followed(self):
+        """The goal is beyond the corridor's end and off to the left: the straight
+        line to it cuts through the left wall, so it has to follow the corridor."""
+        walls = [wall(0.3, 0.6, 2.5, 0.6), wall(0.3, -0.6, 2.5, -0.6)]
+        r, path, _, _ = drive(walls, Pose(3.2, 1.2, 0.0))
+        self.assertTrue(r.ok, r.detail)
+        self.assertKeptClear(path, walls)
+
+    def test_a_dead_end_fails_honestly_and_stops(self):
+        u = [wall(-0.2, 0.6, 1.5, 0.6), wall(-0.2, -0.6, 1.5, -0.6), wall(1.5, -0.6, 1.5, 0.6)]
+        r, path, _, actions = drive(u, Pose(3.5, 0.0, 0.0), start=Pose(-1.5, 0.0, 0.0))
+        self.assertFalse(r.ok)
+        self.assertRegex(r.detail, r"^Something is blocking the way about \d\.\d m ahead "
+                                   r"and I can't find a way around it\.$")
+        self.assertTrue(r.data["blocked"])
+        self.assertGreater(r.data["residual_m"], 2.0)
+        self.assertEqual(actions[-1], Action())              # stopped, not pushing
+        self.assertKeptClear(path, u)
+
+    def test_goto_a_station_in_front_of_a_bin_drives_straight_in(self):
+        bin_ = [Circle(2.0, 0.0, 0.2)]
+        r, path, _, _ = drive(bin_, Pose(1.4, 0.0, 0.0))
+        self.assertTrue(r.ok, r.detail)
+        self.assertLess(max(abs(p.y) for p in path), 0.02)
+
+    def test_clear_space_changes_nothing(self):
+        """With nothing within lookahead the avoiding controller sends exactly
+        what DifferentialGotoController sends, tick for tick."""
+        goal = Pose(2.0, 0.6, 0.5)
+        runs = []
+        for make in (lambda bot: DifferentialGotoController(),
+                     lambda bot: AvoidingGotoController(SimLidar.on(bot, ROOM))):
+            bot = TankFakeRobot()
+            sent = []
+            act = bot.act
+            bot.act = lambda a, act=act, sent=sent: (sent.append(a), act(a))
+            self.assertTrue(run_goto(bot, goal, Limits(), controller=make(bot)).ok)
+            runs.append(sent)
+        self.assertEqual(runs[0], runs[1])
+
+    def test_the_bubble_refusing_makes_it_back_off_then_give_up_honestly(self):
+        """Goal inside a bin's clearance: the planner creeps in (the bin is the
+        goal), the Pi's bubble refuses the last few cm. It must back off rather
+        than keep pushing, and give up after max_refusals."""
+        bin_ = Circle(1.75, 0.0, 0.2)
+        bot = TankFakeRobot()
+        lidar = SimLidar.on(bot, ROOM + [bin_])
+        refused_then = []
+
+        class PiBubble:
+            """Refuses forward motion within 5 cm of the bin, like safety.py's creep rule."""
+
+            def observe(self):
+                return bot.observe()
+
+            def act(self, a):
+                gap = math.hypot(bot.base.x - bin_.x, bot.base.y - bin_.y) - bin_.r - CFG.radius_m
+                refuse = a.base_vx > 0 and gap < 0.05
+                if lidar.bubble_blocked and not refuse:
+                    refused_then.append(a)
+                lidar.bubble_blocked = refuse
+                bot.act(Action() if refuse else a)
+
+        r = run_goto(PiBubble(), Pose(1.5, 0.0, 0.0), Limits(), timeout_s=60.0,
+                     controller=AvoidingGotoController(lidar))
+        self.assertFalse(r.ok)
+        self.assertIn("safety bubble keeps stopping me", r.detail)
+        self.assertEqual(r.data["bubble_refusals"], CFG.max_refusals)
+        # every refusal was answered by backing away; the last command is the stop
+        backoffs, final = refused_then[:-1], refused_then[-1]
+        self.assertEqual(len(backoffs), CFG.max_refusals)
+        self.assertTrue(all(a.base_vx < 0 for a in backoffs))
+        self.assertEqual(final, Action())
+
+    def test_a_stale_lidar_stops_the_robot_and_says_so(self):
+        for source, why in ((lambda: Scan(0.0, ((0.0, 3.0),)), r"last scan is \d+\.\d s old"),
+                            (lambda: None, r"hasn't sent a scan yet")):
+            bot = TankFakeRobot()
+            sent = []
+            act = bot.act
+            bot.act = lambda a, act=act, sent=sent: (sent.append(a), act(a))
+            r = run_goto(bot, Pose(2.0, 0.0, 0.0), Limits(),
+                         controller=AvoidingGotoController(source))
+            with self.subTest(why=why):
+                self.assertFalse(r.ok)
+                self.assertIn("I can't see where I'm going", r.detail)
+                self.assertRegex(r.detail, why)
+                self.assertLess(bot.base.x, 0.25)        # moved only while the scan was fresh
+                self.assertEqual(sent[-1], Action())
+
+    def test_turning_round_next_to_a_wall_with_blind_corners_is_slow(self):
+        occ = wheels()
+        m = Mount(inverted=True)
+        m = Mount(inverted=True, mask=occluder_mask(occ, m))
+        near_wall = [wall(0.0, 0.48, 0.48, 0.0)]
+        bot = TankFakeRobot()
+        lidar = SimLidar.on(bot, ROOM + near_wall, mount=m, occluders=occ)
+        sent = []
+        act = bot.act
+        bot.act = lambda a: (sent.append(a), act(a))
+        run_goto(bot, Pose(-1.0, 0.0, 0.0), Limits(), timeout_s=3.0,
+                 controller=AvoidingGotoController(lidar))
+        self.assertTrue(sent)
+        self.assertLessEqual(max(abs(a.base_wz) for a in sent),
+                             CFG.creep_scale * Limits().w_max + 1e-9)
 
 
 if __name__ == "__main__":
