@@ -23,8 +23,8 @@ still. Integrated, that is a heading that doesn't care how much the tyres
 slide: the skid-steer's weak spot. It still drifts slowly (bias), which the
 wheels can't fix and the lidar map later can.
 
-Permissions: /dev/hidrawN is root-only by default. A udev rule for it (group
-plugdev) fixes that for good; for a quick test, `sudo chmod 666 /dev/hidraw0`.
+Permissions: /dev/hidrawN is root-only by default. pi/setup.sh installs a
+udev rule for it (group plugdev); for a quick test, `sudo chmod 666 /dev/hidraw0`.
 """
 
 from __future__ import annotations
@@ -201,7 +201,7 @@ class D435iImu:
             self._fd = os.open(path, os.O_RDWR)
         except PermissionError:
             raise PermissionError(
-                f"can't open {path}: it needs a udev rule (group plugdev), or for now "
+                f"can't open {path}: run pi/setup.sh (installs the udev rule), or for now "
                 f"`sudo chmod 666 {path}`") from None
         self._feature(REPORT_ACCEL, POWER_ON, self.accel_hz)
         self._feature(REPORT_GYRO, POWER_ON, self.gyro_hz)
