@@ -823,8 +823,15 @@ class FakePiScriptTest(unittest.TestCase):
         self.addCleanup(proc.kill)
         assert proc.stderr is not None
         self.addCleanup(proc.stderr.close)
-        started = proc.stderr.readline()
-        match = re.search(r"listening on 127\.0\.0\.1 port (\d+);.*watchdog 300 ms", started)
+        started, match = "", None
+        for _ in range(10):                     # the gyro says what it found first
+            line = proc.stderr.readline()
+            if not line:
+                break
+            started += line
+            match = re.search(r"listening on 127\.0\.0\.1 port (\d+);.*watchdog 300 ms", line)
+            if match:
+                break
         self.assertIsNotNone(match, started)
         assert match is not None
         client = RawClient(int(match.group(1)))
