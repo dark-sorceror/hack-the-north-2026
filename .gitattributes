@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts run on the Linux dev board and must keep LF endings even when
+# checked out on Windows, or bash fails with `\r: command not found`.
+*.sh text eol=lf
+
+# Patches must stay LF too - `git apply` rejects CRLF context lines against an
+# LF checkout, which is the documented failure mode this patch already has a
+# sed fallback for.
+*.patch text eol=lf
