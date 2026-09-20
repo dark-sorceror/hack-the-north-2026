@@ -135,7 +135,7 @@ DDSM115_ERROR_BITS = ((0x01, "sensor"), (0x02, "overcurrent"),
 # Replaces the vendored module's own ImportError, which names an offline wheel
 # this repository does not ship.
 PYSERIAL_MISSING = ("pyserial is not installed, and the DDSM115 wheels need it: on the Pi, "
-                    "pi/setup.sh installs it (python3-serial); elsewhere, pip install pyserial")
+                    "nav-pi/setup.sh installs it (python3-serial); elsewhere, pip install pyserial")
 
 
 def _ddsm115() -> Any:

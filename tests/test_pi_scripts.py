@@ -25,9 +25,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DOCTOR = ROOT / "scripts" / "pi_doctor.sh"
 DEPLOY = ROOT / "scripts" / "pi_deploy.sh"
-SETUP = ROOT / "pi" / "setup.sh"
-SERVICE = ROOT / "pi" / "retriever-bridge.service"
-SHELL_FILES = sorted({*(ROOT / "scripts").glob("*.sh"), *(ROOT / "pi").glob("*.sh")})
+SETUP = ROOT / "nav-pi" / "setup.sh"
+SERVICE = ROOT / "nav-pi" / "retriever-bridge.service"
+SHELL_FILES = sorted({*(ROOT / "scripts").glob("*.sh"), *(ROOT / "nav-pi").glob("*.sh")})
 BASH = shutil.which("bash")
 UNREACHABLE = "nonexistent-pi.local"
 

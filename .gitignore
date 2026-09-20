@@ -4,6 +4,18 @@ __pycache__/
 *.egg-info/
 .venv/
 .pytest_cache/
+.ruff_cache/
+
+# Test temp dirs. The VLA merge committed ten of these, symlinks and all.
+.pytest-basetemp*/
+.pytest-tmp*/
+
+# Model weights are pulled down, never committed.
+*.pt
+weights/clip/ViT-B-32.pt
+
+# Teleop drive recordings
+data/drives/
 
 # secrets and local config
 .env
@@ -16,4 +28,4 @@ SO-101/scripts/baseten/*.tar.gz
 artifacts/
 *.pcm
 *.wav
-weights/clip/ViT-B-32.pt
+.DS_Store

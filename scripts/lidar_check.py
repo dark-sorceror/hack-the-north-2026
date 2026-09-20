@@ -11,7 +11,7 @@ the way the safety bubble thinks it is?
 It prints the lidar's info and health, spins it up, then twice a second the
 nearest return in each 45-degree sector of the ROBOT (with the --lidar-*
 mount flags; without them, of the lidar itself), the revolution rate, and how
-many rays came back. Needs pyserial (python3-serial; pi/setup.sh installs it)
+many rays came back. Needs pyserial (python3-serial; nav-pi/setup.sh installs it)
 and, with --motor-pin, gpiozero (preinstalled on Raspberry Pi OS).
 
 Angles: counter-clockwise degrees, 0 = the lidar's 0 mark (the side AWAY from

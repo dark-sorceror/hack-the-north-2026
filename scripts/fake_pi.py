@@ -9,7 +9,7 @@ just the process. One log line at start says where it listens, which driver, and
 timeout, which is the first thing to check when the robot stops "for no reason".
 
 On the Pi: the fake needs nothing installed. `--driver real` needs pyserial
-(pi/setup.sh installs python3-serial) for the DDSM115 wheels:
+(nav-pi/setup.sh installs python3-serial) for the DDSM115 wheels:
 
     python3 scripts/fake_pi.py --driver real --wheel-port /dev/serial/by-id/<RS485 adapter>
 

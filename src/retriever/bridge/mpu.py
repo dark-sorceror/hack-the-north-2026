@@ -89,7 +89,7 @@ class I2CDevice:
         except FileNotFoundError:
             raise FileNotFoundError(
                 f"{bus} is missing: the Pi's header I2C is off. Add 'dtparam=i2c_arm=on' to "
-                "/boot/firmware/config.txt and reboot (pi/setup.sh does it)") from None
+                "/boot/firmware/config.txt and reboot (nav-pi/setup.sh does it)") from None
         except PermissionError:
             raise PermissionError(f"can't open {bus}: the user needs the i2c group") from None
         try:
