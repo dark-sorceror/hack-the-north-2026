@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Teleop</title>
+<style>
+  :root { --ground:#E9EAEC; --surface:#FCFCFD; --ink:#14171C; --soft:#757C86; --rule:#CACDD3;
+          --hot:#B45C09; --bad:#A11B1B; --ok:#196B4A; --pt:#17395F; --trail:#6A3FA0; --key:#DDE0E5;
+          --mono:ui-monospace,Menlo,monospace; }
+  @media (prefers-color-scheme: dark) { :root { --ground:#15171B; --surface:#1C1F24; --ink:#E9EBEE;
+          --soft:#79808B; --rule:#31373F; --hot:#F0A03C; --bad:#E8756A; --ok:#4FBF8B; --pt:#8FB4DC;
+          --trail:#C3A3EE; --key:#2A2F36; } }
+  * { box-sizing:border-box; } html,body { height:100%; margin:0; }
+  body { background:var(--ground); color:var(--ink); font-family:var(--mono); font-size:13px;
+         display:grid; grid-template-rows:auto 1fr; overflow:hidden; }
+  header { display:flex; flex-wrap:wrap; gap:6px 18px; align-items:baseline; padding:10px 16px;
+           background:var(--surface); border-bottom:1px solid var(--rule); }
+  h1 { font-size:17px; margin:0 6px 0 0; }
+  .k { color:var(--soft); } .v { font-variant-numeric:tabular-nums; }
+  .badge { padding:1px 7px; border-radius:3px; font-weight:600; }
+  .up { color:var(--ok); } .down { color:var(--bad); } .warn { color:var(--hot); }
+  .estop { background:var(--bad); color:#fff; }
+  main { display:grid; grid-template-columns:1fr 300px; min-height:0; }
+  @media (max-width:760px) { main { grid-template-columns:1fr; grid-template-rows:1fr auto; } }
+  .view { position:relative; min-height:0; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; }
+  aside { background:var(--surface); border-left:1px solid var(--rule); padding:14px; display:flex;
+          flex-direction:column; gap:14px; overflow:auto; }
+  .pad { display:grid; grid-template-columns:repeat(3,64px); grid-template-rows:repeat(2,64px); gap:6px;
+         justify-content:center; touch-action:none; user-select:none; -webkit-user-select:none; }
+  .pad button { font:inherit; font-size:18px; font-weight:600; border:1px solid var(--rule); border-radius:6px;
+                background:var(--key); color:var(--ink); }
+  .pad button.on { background:var(--ink); color:var(--surface); }
+  .pad .w { grid-column:2; } .pad .a { grid-column:1; grid-row:2; } .pad .s { grid-column:2; grid-row:2; }
+  .pad .d { grid-column:3; grid-row:2; }
+  .gears { display:flex; gap:6px; } .gears button { flex:1; }
+  button.act { font:inherit; padding:8px; border:1px solid var(--rule); border-radius:5px;
+               background:var(--key); color:var(--ink); cursor:pointer; }
+  button.act.sel { background:var(--ink); color:var(--surface); }
+  button.big { background:var(--bad); color:#fff; border:none; font-weight:700; font-size:15px; padding:12px; }
+  table { border-collapse:collapse; width:100%; } td { padding:2px 0; } td.v { text-align:right; }
+  .note { color:var(--soft); font-size:11.5px; line-height:1.5; }
+  #bubble { min-height:1.4em; }
+  .row { display:flex; gap:6px; } .row > * { flex:1; }
+  canvas { cursor:crosshair; }
+  #auto { border:1px solid var(--rule); border-radius:6px; padding:9px 10px; line-height:1.45; }
+  #auto.driving { border-color:var(--trail); } #auto.arrived { border-color:var(--ok); }
+  #auto.gaveup { border-color:var(--hot); }
+  #auto .st { font-weight:700; }
+  #pathbox { border:1px solid var(--rule); border-radius:6px; padding:8px 10px; line-height:1.5; }
+  #pathbox.on { border-color:var(--trail); }
+  #pathbox .ctl { display:none; margin-top:6px; } #pathbox.on .ctl { display:block; }
+  #pathbox label { display:block; margin:6px 0; }
+  details.cal { border:1px solid var(--rule); border-radius:6px; padding:8px 10px; }
+  details.cal summary { cursor:pointer; font-weight:600; }
+  details.cal ol { margin:6px 0; padding-left:18px; line-height:1.5; }
+  details.cal input { width:3.2em; font:inherit; }
+  #calout { line-height:1.5; margin-top:6px; } #calout code { user-select:all; }
+  #auto.driving .st { color:var(--trail); } #auto.arrived .st { color:var(--ok); }
+  #auto.gaveup .st, #auto .err { color:var(--hot); }
+</style></head>
+<body>
+<header>
+  <h1>Teleop</h1>
+  <span><span class="k">link </span><span id="link" class="v">…</span></span>
+  <span><span class="k">state </span><span id="rate" class="v">–</span></span>
+  <span id="flags"></span>
+  <span id="rec" class="k"></span>
+</header>
+<main>
+  <div class="view"><canvas id="cv"></canvas></div>
+  <aside>
+    <div class="pad" id="pad">
+      <button class="w" data-k="f">W</button><button class="a" data-k="l">A</button>
+      <button class="s" data-k="b">S</button><button class="d" data-k="r">D</button>
+    </div>
+    <div class="gears" id="gears"></div>
+    <div id="auto"><span class="st">Click the map</span> to send it there,
+      <b>shift-click</b> to go there and come back.
+      <span class="k">Right-click, space or any drive key cancels.</span></div>
+    <div id="pathbox">
+      <button class="act" id="drawbtn" style="width:100%">&#9998; draw a path (P)</button>
+      <div class="ctl">
+        <span class="k">Click the map to add points; the purple curve is what it will drive.
+          <b>Backspace</b> undoes a point.</span>
+        <label><input type="checkbox" id="revback" checked> come back reversing
+          <span class="k">(no turn-around: cancels the wheels' turn slip)</span></label>
+        <div class="row"><button class="act" id="pathgo">drive it (Enter)</button>
+          <button class="act" id="pathback">drive it and come back</button></div>
+        <div class="row" style="margin-top:6px"><button class="act" id="pathclear">clear points</button></div>
+      </div>
+    </div>
+    <div class="row">
+      <button class="act" id="homebtn">&#8962; go home (H)</button>
+      <button class="act" id="sethomebtn">set home here</button>
+    </div>
+    <table>
+      <tr><td class="k">asked</td><td class="v" id="cmd">–</td></tr>
+      <tr><td class="k">measured</td><td class="v" id="meas">–</td></tr>
+      <tr><td class="k">pose</td><td class="v" id="pose">–</td></tr>
+      <tr><td class="k">driven</td><td class="v" id="odo">–</td></tr>
+      <tr><td class="k">heading from</td><td class="v" id="hdg">–</td></tr>
+    </table>
+    <div id="bubble" class="warn"></div>
+    <details class="cal" id="cal"><summary>Calibrate turning</summary>
+      <ol><li>Tape a mark on the floor at the robot's nose.</li>
+        <li>Press <b>Start</b>.</li>
+        <li>Spin it with <b>A</b> or <b>D</b> until it is back on the mark after
+          <input id="calturns" type="number" min="1" max="10" step="1" value="2"> full turns.</li>
+        <li>Press <b>Done</b>.</li></ol>
+      <div class="row"><button class="act" id="calstart">Start</button>
+        <button class="act" id="caldone">Done</button></div>
+      <div id="calout" class="k"></div>
+    </details>
+    <button class="act big" id="estopbtn">E-STOP  (Esc)</button>
+    <div class="row">
+      <button class="act" id="clearbtn">clear e-stop</button>
+      <button class="act" id="resetbtn">reset pose (R)</button>
+    </div>
+    <div class="note">Hold <b>W A S D</b> or arrows to drive; let go to stop.
+      <b>1 2 3</b> speed · <b>space</b> stop now · <b>Esc</b> e-stop (latched on the Pi) ·
+      <b>H</b> home · <b>P</b> draw a path.
+      Leaving this tab stops the robot. Grid: 0.5 m. Trail = odometry.
+      Click-to-go aims at where the robot <i>believes</i> that spot is.
+      Map: black = seen solid, white = seen clear, red tint = too close for the robot's centre,
+      purple line = its planned route.</div>
+  </aside>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const KEYS = {KeyW:'f', ArrowUp:'f', KeyS:'b', ArrowDown:'b', KeyA:'l', ArrowLeft:'l', KeyD:'r', ArrowRight:'r'};
+const held = new Set();
+let gear = 0, snap = null, lastSent = '';
+
+function post(path, body) {
+  return fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                      body: body ? JSON.stringify(body) : '{}', keepalive:true}).catch(() => {});
+}
+function vec() {
+  return [(held.has('f') ? 1 : 0) - (held.has('b') ? 1 : 0), (held.has('l') ? 1 : 0) - (held.has('r') ? 1 : 0)];
+}
+function send(force) {
+  const [fwd, turn] = vec();
+  const key = fwd + ',' + turn + ',' + gear;
+  // idle pages stay silent, so a second open tab never overrides the driver
+  if (!force && fwd === 0 && turn === 0 && lastSent === key) return;
+  lastSent = key;
+  post('/drive', {fwd, turn, gear});
+  paintPad();
+}
+setInterval(() => { if (held.size) send(true); }, 66);
+
+function release() { held.clear(); send(true); }
+function paintPad() {
+  document.querySelectorAll('#pad button').forEach(b => b.classList.toggle('on', held.has(b.dataset.k)));
+}
+addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = KEYS[e.code];
+  if (k) { e.preventDefault(); if (!e.repeat) { held.add(k); send(true); } return; }
+  if (e.code === 'Space') { e.preventDefault(); held.clear(); lastSent = ''; post('/halt'); paintPad(); }
+  else if (e.code === 'Escape') { held.clear(); post('/estop'); paintPad(); }
+  else if (e.code === 'KeyR') { post('/reset'); }
+  else if (e.code === 'KeyH') { goHome(); }
+  else if (e.code === 'KeyP') { setDrawing(!drawing); }
+  else if (drawing && e.code === 'Backspace') { e.preventDefault(); waypoints.pop(); draw(); }
+  else if (drawing && e.code === 'Enter') { e.preventDefault(); sendPath(false); }
+  else if (/^Digit[1-9]$/.test(e.code)) { setGear(+e.code.slice(5) - 1); }
+});
+addEventListener('keyup', e => { const k = KEYS[e.code]; if (k) { held.delete(k); send(true); } });
+addEventListener('blur', release);
+document.addEventListener('visibilitychange', () => { if (document.hidden) release(); });
+
+document.querySelectorAll('#pad button').forEach(b => {
+  const on = e => { e.preventDefault(); b.setPointerCapture?.(e.pointerId); held.add(b.dataset.k); send(true); };
+  const off = e => { e.preventDefault(); held.delete(b.dataset.k); send(true); };
+  b.addEventListener('pointerdown', on);
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => b.addEventListener(ev, off));
+});
+function setGear(g) {
+  if (!snap || g < 0 || g >= snap.gears.length) return;
+  gear = g; send(true); paintGears();
+}
+function paintGears() {
+  const box = $('gears');
+  if (!snap) return;
+  if (box.children.length !== snap.gears.length) {
+    box.innerHTML = '';
+    snap.gears.forEach((g, i) => {
+      const b = document.createElement('button');
+      b.className = 'act'; b.textContent = (i + 1) + ' · ' + g[0].toFixed(2) + ' m/s';
+      b.onclick = () => setGear(i); box.appendChild(b);
+    });
+  }
+  [...box.children].forEach((b, i) => b.classList.toggle('sel', i === gear));
+}
+$('estopbtn').onclick = () => { held.clear(); post('/estop'); };
+async function command(path, body) {
+  try {
+    const res = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                                   body: JSON.stringify(body || {})});
+    autoErr = res.ok ? '' : ((await res.json().catch(() => ({}))).error || res.statusText);
+  } catch (err) { autoErr = 'teleop server unreachable'; }
+}
+function goHome() { held.clear(); paintPad(); command('/home'); }
+$('homebtn').onclick = goHome;
+$('sethomebtn').onclick = () => command('/sethome');
+$('calstart').onclick = () => command('/calib/start');
+function setDrawing(on) {
+  drawing = on; $('pathbox').classList.toggle('on', on);
+  $('drawbtn').innerHTML = on ? '&#10003; done drawing (P)' : '&#9998; draw a path (P)';
+  draw();
+}
+async function sendPath(comeBack) {
+  if (!waypoints.length) { autoErr = 'click the map to add points first'; return; }
+  held.clear(); paintPad();
+  await command('/path', {points: waypoints, come_back: comeBack, reverse_back: $('revback').checked});
+  if (!autoErr) { waypoints = []; setDrawing(false); }
+}
+$('drawbtn').onclick = () => setDrawing(!drawing);
+$('pathgo').onclick = () => sendPath(false);
+$('pathback').onclick = () => sendPath(true);
+$('pathclear').onclick = () => { waypoints = []; draw(); };
+// the same curve the robot will drive: centripetal Catmull-Rom through every point
+function curveThrough(pts, step = 0.04) {
+  const P = pts.filter((p, i) => i === 0 || Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > 1e-6);
+  if (P.length < 3) return P;
+  const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const E = [[2 * P[0][0] - P[1][0], 2 * P[0][1] - P[1][1]], ...P,
+             [2 * P.at(-1)[0] - P.at(-2)[0], 2 * P.at(-1)[1] - P.at(-2)[1]]];
+  const out = [P[0]];
+  for (let i = 1; i < E.length - 2; i++) {
+    const [p0, p1, p2, p3] = [E[i - 1], E[i], E[i + 1], E[i + 2]];
+    const t0 = 0, t1 = t0 + (Math.sqrt(d(p0, p1)) || 1e-6), t2 = t1 + (Math.sqrt(d(p1, p2)) || 1e-6),
+          t3 = t2 + (Math.sqrt(d(p2, p3)) || 1e-6);
+    const L = (a, b, ta, tb, t) => tb - ta < 1e-9 ? a :
+      [a[0] * (tb - t) / (tb - ta) + b[0] * (t - ta) / (tb - ta), a[1] * (tb - t) / (tb - ta) + b[1] * (t - ta) / (tb - ta)];
+    const n = Math.max(1, Math.floor(d(p1, p2) / step));
+    for (let k = 1; k <= n; k++) {
+      const t = t1 + (t2 - t1) * k / n;
+      const a1 = L(p0, p1, t0, t1, t), a2 = L(p1, p2, t1, t2, t), a3 = L(p2, p3, t2, t3, t);
+      out.push(L(L(a1, a2, t0, t2, t), L(a2, a3, t1, t3, t), t1, t2, t));
+    }
+  }
+  return out;
+}
+$('caldone').onclick = () => command('/calib/done', {turns: +$('calturns').value || 2});
+$('clearbtn').onclick = () => post('/clear');
+$('resetbtn').onclick = () => post('/reset');
+
+// ---- the view: follows the robot, world x (start heading) points up
+const cv = $('cv'), cx = cv.getContext('2d');
+let view = null, autoErr = '';
+let drawing = false, waypoints = [];
+// ---- the map: deflated bytes, one per 5 cm cell, decoded once per version
+let mapImg = null, mapMeta = null, mapBusy = false;
+async function loadMap(m) {
+  if (!m || mapBusy || (mapMeta && mapMeta.v === m.v)) return;
+  mapBusy = true;
+  try {
+    const bin = Uint8Array.from(atob(m.data), c => c.charCodeAt(0));
+    const cells = new Uint8Array(await new Response(
+      new Blob([bin]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+    // screen-aligned: image column = y (left is +y), image row = x (up is +x)
+    const img = new ImageData(m.h, m.w), px = img.data;
+    const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+    const COL = {1: dark ? [60, 66, 76, 150] : [255, 255, 255, 190],
+                 2: dark ? [233, 235, 238, 255] : [20, 23, 28, 255],
+                 3: dark ? [232, 117, 106, 60] : [161, 27, 27, 40]};
+    for (let iy = 0; iy < m.h; iy++) for (let ix = 0; ix < m.w; ix++) {
+      const col = COL[cells[iy * m.w + ix]];
+      if (!col) continue;
+      const k = ((m.w - 1 - ix) * m.h + (m.h - 1 - iy)) * 4;
+      px[k] = col[0]; px[k + 1] = col[1]; px[k + 2] = col[2]; px[k + 3] = col[3];
+    }
+    const off = document.createElement('canvas'); off.width = m.h; off.height = m.w;
+    off.getContext('2d').putImageData(img, 0, 0);
+    mapImg = off; mapMeta = m;
+  } catch (e) { /* an old browser without DecompressionStream: no map, still drives */ }
+  mapBusy = false;
+}
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function draw() {
+  const dpr = devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cx.clearRect(0, 0, W, H);
+  if (!snap) return;
+  const [rx, ry, th] = snap.pose, S = Math.min(W, H) / 6;          // 6 m across
+  const sx = (x, y) => W / 2 - (y - ry) * S, sy = (x, y) => H / 2 - (x - rx) * S;
+  view = {rx, ry, S, W, H};
+  if (snap.map === null) { mapImg = null; mapMeta = null; }
+  if (mapImg && mapMeta) {
+    const m = mapMeta, left = W / 2 - (m.y0 + m.h * m.res - ry) * S, top = H / 2 - (m.x0 + m.w * m.res - rx) * S;
+    cx.imageSmoothingEnabled = false;
+    cx.drawImage(mapImg, left, top, m.h * m.res * S, m.w * m.res * S);
+  }
+  cx.strokeStyle = css('--rule'); cx.lineWidth = 1; cx.beginPath();
+  for (let g = Math.floor((rx - 6) * 2) / 2; g <= rx + 6; g += 0.5) { cx.moveTo(0, sy(g, 0)); cx.lineTo(W, sy(g, 0)); }
+  for (let g = Math.floor((ry - 6) * 2) / 2; g <= ry + 6; g += 0.5) { cx.moveTo(sx(0, g), 0); cx.lineTo(sx(0, g), H); }
+  cx.stroke();
+  cx.strokeStyle = css('--trail'); cx.lineWidth = 2; cx.beginPath();
+  snap.trail.forEach(([x, y], i) => i ? cx.lineTo(sx(x, y), sy(x, y)) : cx.moveTo(sx(x, y), sy(x, y)));
+  cx.stroke();
+  if (snap.scan) {
+    const c = Math.cos(th), s = Math.sin(th);
+    for (const [bx, by, near] of snap.scan.pts) {
+      const wx = rx + bx * c - by * s, wy = ry + bx * s + by * c;
+      cx.fillStyle = near ? css('--bad') : css('--pt');
+      cx.fillRect(sx(wx, wy) - 2, sy(wx, wy) - 2, 4, 4);
+    }
+  }
+  if (snap.home) {                                    // home: a ring with a tick for its heading
+    const [hx, hy, hth] = snap.home, px = sx(hx, hy), py = sy(hx, hy);
+    cx.strokeStyle = css('--ok'); cx.lineWidth = 2.5; cx.beginPath(); cx.arc(px, py, 11, 0, 2 * Math.PI);
+    cx.moveTo(px, py); cx.lineTo(px - Math.sin(hth) * 20, py - Math.cos(hth) * 20); cx.stroke();
+    cx.fillStyle = css('--ok'); cx.font = '600 11px ui-monospace,monospace'; cx.fillText('home', px + 14, py + 4);
+  }
+  // robot footprint (front, rear, half width) and heading
+  const [fr, re, hw] = snap.footprint, c = Math.cos(th), s = Math.sin(th);
+  const corner = (bx, by) => [sx(rx + bx * c - by * s, ry + bx * s + by * c), sy(rx + bx * c - by * s, ry + bx * s + by * c)];
+  cx.strokeStyle = css('--ink'); cx.lineWidth = 2; cx.beginPath();
+  [[fr, hw], [fr, -hw], [-re, -hw], [-re, hw], [fr, hw]].forEach(([a, b], i) => { const [px, py] = corner(a, b); i ? cx.lineTo(px, py) : cx.moveTo(px, py); });
+  cx.stroke();
+  const [nx, ny] = corner(fr + 0.12, 0), [ox, oy] = corner(0, 0);
+  cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(nx, ny); cx.stroke();
+  if (snap.route && snap.route.length > 1) {          // the planned route
+    cx.strokeStyle = css('--trail'); cx.lineWidth = 3; cx.globalAlpha = 0.8; cx.beginPath();
+    snap.route.forEach(([x, y], i) => i ? cx.lineTo(sx(x, y), sy(x, y)) : cx.moveTo(sx(x, y), sy(x, y)));
+    cx.stroke(); cx.globalAlpha = 1;
+  }
+  if (drawing || waypoints.length) {                 // the path being drawn
+    const pts = curveThrough([[rx, ry], ...waypoints]);
+    cx.strokeStyle = css('--trail'); cx.lineWidth = 2; cx.setLineDash([7, 5]); cx.beginPath();
+    pts.forEach(([x, y], i) => i ? cx.lineTo(sx(x, y), sy(x, y)) : cx.moveTo(sx(x, y), sy(x, y)));
+    cx.stroke(); cx.setLineDash([]);
+    cx.fillStyle = css('--trail'); cx.font = '600 11px ui-monospace,monospace';
+    waypoints.forEach(([x, y], i) => {
+      cx.beginPath(); cx.arc(sx(x, y), sy(x, y), 5, 0, 2 * Math.PI); cx.fill();
+      cx.fillText(String(i + 1), sx(x, y) + 8, sy(x, y) - 6);
+    });
+  }
+  const a = snap.auto;
+  if (a && a.goal) {
+    const gx = sx(a.goal[0], a.goal[1]), gy = sy(a.goal[0], a.goal[1]);
+    cx.strokeStyle = css('--trail'); cx.lineWidth = 1.5; cx.setLineDash([5, 5]);
+    cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(gx, gy); cx.stroke(); cx.setLineDash([]);
+    cx.lineWidth = 2.5; cx.beginPath();
+    cx.arc(gx, gy, 9, 0, 2 * Math.PI); cx.moveTo(gx - 14, gy); cx.lineTo(gx + 14, gy);
+    cx.moveTo(gx, gy - 14); cx.lineTo(gx, gy + 14); cx.stroke();
+    if (a.plan) {                                   // where the avoidance is steering
+      const b = th + a.plan.steer_deg * Math.PI / 180, L = (0.25 + 0.5 * a.plan.speed) * S;
+      const [ex, ey] = [ox - Math.sin(b) * L, oy - Math.cos(b) * L];
+      cx.strokeStyle = a.plan.status === 'blocked' ? css('--bad') : css('--ok'); cx.lineWidth = 3;
+      cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(ex, ey); cx.stroke();
+    }
+  }
+}
+cv.addEventListener('click', async e => {
+  if (!view) return;
+  const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+  const x = view.rx - (py - view.H / 2) / view.S, y = view.ry - (px - view.W / 2) / view.S;
+  if (drawing) { waypoints.push([x, y]); autoErr = ''; draw(); return; }
+  held.clear(); paintPad();
+  command('/goto', {x, y, round_trip: e.shiftKey});
+});
+cv.addEventListener('contextmenu', e => { e.preventDefault(); post('/cancel'); });
+
+function fmt(n, d = 2) { return (n >= 0 ? ' ' : '') + n.toFixed(d); }
+function paint() {
+  const s = snap;
+  const link = $('link');
+  link.textContent = s.link === 'up' ? 'up' : s.link + (s.link_detail ? ' — ' + s.link_detail : '');
+  link.className = 'v ' + (s.link === 'up' ? 'up' : 'down');
+  $('rate').textContent = s.state_age_ms == null ? '–' : `${s.state_hz} Hz, ${s.state_age_ms} ms old`;
+  const f = [];
+  if (s.estop) f.push('<span class="badge estop">E-STOP LATCHED</span>');
+  if (s.watchdog && s.link === 'up') f.push('<span class="badge down">watchdog tripped</span>');
+  $('flags').innerHTML = f.join(' ');
+  $('rec').textContent = s.recording ? `● recording ${s.recording.lines} lines → ${s.recording.path}` : '';
+  $('cmd').textContent = `${fmt(s.cmd[0])} m/s ${fmt(s.cmd[1])} rad/s`;
+  $('meas').textContent = `${fmt(s.meas[0])} m/s ${fmt(s.meas[1])} rad/s`;
+  const deg = ((s.pose[2] * 180 / Math.PI) % 360 + 540) % 360 - 180;       // -180..180
+  $('pose').textContent = `${fmt(s.pose[0])}, ${fmt(s.pose[1])} m ${fmt(deg, 0)}°`;
+  $('odo').textContent = `${s.odometer_m.toFixed(2)} m`;
+  const h = s.heading || {};
+  $('hdg').textContent = !h.source ? '–' : h.source === 'gyro'
+    ? 'gyro' + (h.slip_pct != null ? ` (wheels ${h.slip_pct > 0 ? '+' : ''}${h.slip_pct}%)` : '')
+    : 'wheels (no gyro)';
+  const b = s.bubble;
+  $('bubble').textContent = !b ? (s.scan ? '' : 'no lidar on the Pi: nothing stops it but you')
+    : b.state === 'clear' ? '' : `lidar bubble ${b.state}: ${b.reason}`;
+  const a = s.auto, box = $('auto');
+  if (autoErr) {
+    box.className = 'gaveup';
+    box.innerHTML = `<span class="st err">Can't go:</span> ${autoErr}`;
+  } else if (a.status === 'driving') {
+    box.className = 'driving';
+    const curve = a.leg === 'path' || a.leg === 'back';
+    const how = curve ? (a.plan && a.plan.reason ? a.plan.reason : 'pure pursuit along your path')
+      : a.avoiding ? (a.plan && a.plan.reason ? a.plan.reason : 'lidar: following the route')
+                   : 'no lidar: straight line, nothing stops it but you';
+    const where = a.leg === 'home' ? 'home' : a.leg === 'path' ? 'the end of your path'
+      : a.leg === 'back' ? 'the start, retracing the path' : `${a.goal[0].toFixed(2)}, ${a.goal[1].toFixed(2)}`;
+    let what;
+    if (a.phase === 'wait') what = `<span class="st">Arrived</span> (${a.detail}) · heading home in a moment`;
+    else if (a.phase === 'face') what = `<span class="st">Turning</span> to face the way it started`;
+    else what = `<span class="st">${a.reverse ? 'Backing up' : 'Driving'}</span> to ${where}` + (a.dist != null ? ` · ${a.dist.toFixed(2)} m to go` : '')
+               + (a.then_home ? ' · then back' : '');
+    box.innerHTML = what + `<br><span class="k">${how}</span>`;
+  } else if (a.status) {
+    box.className = a.status === 'arrived' || a.status === 'home' ? 'arrived' : a.status === 'gave up' ? 'gaveup' : '';
+    box.innerHTML = `<span class="st">${a.status[0].toUpperCase() + a.status.slice(1)}</span>`
+      + (a.detail ? `: ${a.detail}` : '') + `<br><span class="k">Click the map to go again.</span>`;
+  }
+  paintCalib(s);
+  if (gear !== s.gear && !held.size) gear = s.gear;
+  paintGears();
+  draw();
+}
+function paintCalib(s) {
+  const c = s.calib, out = $('calout'), sc = s.scrub || {};
+  const using = sc.used == null ? '' : `Turn-slip factor in use: <b>${(+sc.used).toFixed(3)}</b>`
+    + (sc.pi != null && Math.abs(sc.pi - sc.used) > 1e-6 ? ` (the Pi says ${(+sc.pi).toFixed(3)})` : '');
+  if (!c) { out.innerHTML = using; return; }
+  if (c.active) {
+    out.innerHTML = `The wheels say it has turned <b>${Math.abs(c.turned_deg).toFixed(0)}°</b> `
+      + `(${(Math.abs(c.turned_deg) / 360).toFixed(2)} turns). Stop exactly on the mark, then Done.`;
+  } else if (c.result) {
+    const r = c.result, f = r.scrub_factor.toFixed(3);
+    out.innerHTML = `The wheels said <b>${r.odometry_deg.toFixed(0)}°</b> for a true ${r.true_deg.toFixed(0)}° `
+      + `(${r.error_pct > 0 ? '+' : ''}${r.error_pct}%). Turn-slip factor: <b>${f}</b> (was ${r.scrub_was}).<br>`
+      + `Use it now: restart teleop with <code>--scrub-factor ${f}</code><br>`
+      + `Keep it: on the Pi, run the bridge (scripts/fake_pi.py) with <code>--scrub-factor ${f}</code>`;
+  } else out.innerHTML = using;
+}
+function connect() {
+  const es = new EventSource('/stream');
+  es.onmessage = e => { snap = JSON.parse(e.data); loadMap(snap.map); paint(); };
+  es.onerror = () => { $('link').textContent = 'teleop server gone'; $('link').className = 'v down'; };
+}
+addEventListener('resize', draw);
+connect();
+</script>
+</body></html>

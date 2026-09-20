@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# One-shot Pi setup. Run ON the Pi, from ~/retriever:   bash pi/setup.sh
+# One-shot Pi setup. Run ON the Pi, from ~/retriever:
+#
+#   bash pi/setup.sh                  # bridge with the FAKE wheels, on every boot
+#   bash pi/setup.sh --driver real    # the real DDSM115 wheels (any fake_pi.py flags work)
 #
 # Rehearsed on the Pi 4 so the Pi 5 is a repeat, not an experiment. Idempotent:
 # safe to run again after pulling new code.
@@ -10,6 +13,11 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 echo "retriever at $HERE, user $USER"
+# Everything given to this script goes on the bridge's command line, in the unit.
+BRIDGE_ARGS="${*:---driver fake}"
+case "$BRIDGE_ARGS" in *'|'* | *'&'* | *'\'*)
+  echo "setup.sh: bridge arguments may not contain | & or \\" >&2; exit 2 ;; esac
+echo "bridge arguments: $BRIDGE_ARGS"
 
 # The bridge itself is stdlib-only. These are for the REAL drivers and GPIO:
 # pyserial for the arm and wheel buses, gpiozero + lgpio because RPi.GPIO does
@@ -56,7 +64,7 @@ fi
 # a missing group in the unit's SupplementaryGroups makes systemd refuse to
 # start the service at all (status 216/GROUP), which is a bad way to find out.
 GROUPS_OK=""
-for g in dialout gpio; do
+for g in dialout gpio plugdev; do
   if getent group "$g" > /dev/null; then
     sudo usermod -aG "$g" "$USER" || true
     GROUPS_OK="$GROUPS_OK $g"
@@ -65,6 +73,11 @@ for g in dialout gpio; do
   fi
 done
 GROUPS_OK="${GROUPS_OK# }"
+
+# The D435i's gyro (/dev/hidrawN) for the group plugdev, instead of root only.
+sudo install -m 0644 "$HERE/pi/99-retriever-d435i.rules" /etc/udev/rules.d/99-retriever-d435i.rules
+sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=hidraw || true
 
 python3 -c "import sys; assert sys.version_info >= (3, 10), sys.version; print('python', sys.version.split()[0])"
 python3 -S -c "import sys; sys.path.insert(0, '$HERE/src'); import retriever.bridge.server; print('bridge imports with stdlib only: ok')"
@@ -83,7 +96,7 @@ if [ -f "$PIDFILE" ]; then
   rm -f "$PIDFILE"
 fi
 
-sed -e "s|__USER__|$USER|" -e "s|__HOME__|$HOME|" \
+sed -e "s|__USER__|$USER|" -e "s|__HOME__|$HOME|" -e "s|__BRIDGE_ARGS__|$BRIDGE_ARGS|" \
     -e "s|^SupplementaryGroups=.*|SupplementaryGroups=$GROUPS_OK|" \
     "$HERE/pi/retriever-bridge.service" \
   | { if [ -z "$GROUPS_OK" ]; then grep -v '^SupplementaryGroups='; else cat; fi; } \
@@ -95,7 +108,7 @@ sleep 1
 systemctl --no-pager --lines=5 status retriever-bridge || true
 
 echo
-echo "bridge listening on $(hostname).local:7777 (all addresses, IPv4 + IPv6)"
+echo "bridge listening on $(hostname).local:7777 (all addresses, IPv4 + IPv6): $BRIDGE_ARGS"
 echo "  logs:     journalctl -u retriever-bridge -f"
 echo "  restart:  sudo systemctl restart retriever-bridge   (after every scripts/pi_deploy.sh)"
 echo "  from the laptop:"

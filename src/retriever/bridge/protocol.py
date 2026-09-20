@@ -11,6 +11,19 @@ clamp. encode() applies the same rules, so a bad command fails on the laptop, wh
 is. decode() raises nothing but ProtocolError, so a garbled line costs an Error reply, never
 the connection. Stdlib only, importing nothing else from `retriever`: the Pi runs this module
 with nothing installed.
+
+EXTENSIONS WITHOUT A VERSION BUMP (the lidar safety bubble). Strict decoding
+means an old laptop drops any `state` carrying a field it does not know, so
+new fields must never reach a client that did not ask for them:
+
+  - A client that understands them sends `subscribe` once after `hello`. Only
+    then does the server add the optional state fields (bubble, bubble_reason,
+    nearest_m, stop_m) and stream `scan` messages. An old client never
+    subscribes and gets exactly the bytes it always got.
+  - The optional state fields are OMITTED from the line when None (they are
+    never written as null), so a state without them is byte-identical to v1.
+  - An old SERVER answers `subscribe` with an `error` ("unknown message type")
+    and carries on; BridgeRobot recognises that and simply has no lidar data.
 """
 
 from __future__ import annotations
@@ -27,6 +40,10 @@ MAX_LINE_BYTES = 64 * 1024  # per line, terminator excluded (as asyncio's readli
 MAX_JOINTS = 64
 MAX_NAME_LEN = 64
 MAX_TEXT_LEN = 500
+MAX_SCAN_BINS = 720
+
+# SafetyBubble states (bridge/safety.py), in the order it defines them.
+BUBBLE_STATES = ("clear", "slowing", "blocked", "stale")
 
 _MAX_SAFE_INT = 2**53  # beyond this, a peer that reads JSON numbers as doubles loses precision
 _ENVELOPE = ("v", "type")
@@ -86,6 +103,17 @@ class ClearEstop:
 
 
 @dataclass(frozen=True)
+class Subscribe:
+    """"I understand the lidar extensions." Optional, sent once after hello.
+    safety: add the bubble fields to every state. scan: stream `scan` too.
+    Also counts as proof of life, like a heartbeat."""
+
+    TYPE: ClassVar[str] = "subscribe"
+    safety: bool = True
+    scan: bool = True
+
+
+@dataclass(frozen=True)
 class Hello:
     """Pi -> laptop, first line on every connection: the constants and timeouts the Pi owns."""
 
@@ -116,6 +144,32 @@ class State:
     battery: float = 1.0
     estop: bool = False
     watchdog_tripped: bool = False
+    # Lidar safety bubble. Only sent to a client that subscribed, only when the
+    # Pi has a lidar, and left off the line entirely when None.
+    bubble: str | None = None            # clear | slowing | blocked | stale
+    bubble_reason: str | None = None     # why, in words; "" when clear
+    nearest_m: float | None = None       # body -> nearest obstacle; None without a fresh scan
+    stop_m: float | None = None          # body clearance the current command needs
+    # Gyro heading (the D435i's IMU, bridge/imu.py): radians, counter-clockwise,
+    # unwrapped, from wherever it started. Only its CHANGES mean anything: the
+    # laptop's odometry takes its heading from them instead of from the wheels,
+    # which slide in every skid-steer turn. Left off the line without a gyro.
+    yaw: float | None = None
+
+
+@dataclass(frozen=True)
+class Scan:
+    """A downsampled lidar revolution, BASE frame, for the dashboard. Sent to
+    subscribed clients at a few Hz. Bin i covers bearings [i, i+1) * step_deg,
+    CCW from the base's forward axis, measured from the base origin, and holds
+    the nearest return in cm (0 = nothing). `near` lists bins inside the
+    current stop distance. `t` is on the same clock as State.t."""
+
+    TYPE: ClassVar[str] = "scan"
+    t: float
+    step_deg: float
+    ranges_cm: list[int] = field(default_factory=list)
+    near: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -126,10 +180,12 @@ class Error:
     reason: str
 
 
-Message: TypeAlias = Act | Heartbeat | Estop | ClearEstop | Hello | State | Error
+Message: TypeAlias = (
+    Act | Heartbeat | Estop | ClearEstop | Subscribe | Hello | State | Scan | Error
+)
 
-CLIENT_MESSAGES: tuple[type[Message], ...] = (Act, Heartbeat, Estop, ClearEstop)
-SERVER_MESSAGES: tuple[type[Message], ...] = (Hello, State, Error)
+CLIENT_MESSAGES: tuple[type[Message], ...] = (Act, Heartbeat, Estop, ClearEstop, Subscribe)
+SERVER_MESSAGES: tuple[type[Message], ...] = (Hello, State, Error, Scan)
 
 
 def encode(msg: Message) -> bytes:
@@ -142,8 +198,13 @@ def encode(msg: Message) -> bytes:
     if rules is None:
         raise ProtocolError(f"cannot encode {_describe(msg)}: not a protocol message")
     payload: dict[str, Any] = {"v": PROTOCOL_VERSION, "type": msg.TYPE}
+    omit_if_none = _OMIT_IF_NONE.get(type(msg), ())
     for name, check in rules.items():
-        payload[name] = check(getattr(msg, name), f"{msg.TYPE}.{name}")
+        value = getattr(msg, name)
+        if value is None and name in omit_if_none:
+            continue
+        payload[name] = check(value, f"{msg.TYPE}.{name}")
+    _check_across_fields(type(msg), payload)
     # ensure_ascii (the default) keeps every line plain ASCII, whatever the text fields hold.
     return json.dumps(payload, separators=(",", ":")).encode("ascii") + b"\n"
 
@@ -248,6 +309,35 @@ def _arm_joints(value: Any, where: str) -> dict[str, float]:
     return angles
 
 
+def _nonneg(value: Any, where: str) -> float:
+    number = _number(value, where)
+    if number >= 0:
+        return number
+    raise _wrong(where, "a finite number >= 0", value)
+
+
+def _bubble_state(value: Any, where: str) -> str:
+    if isinstance(value, str) and value in BUBBLE_STATES:
+        return str(value)
+    raise _wrong(where, f"one of {', '.join(BUBBLE_STATES)}", value)
+
+
+def _int_list(limit: int, lo: int, hi: int) -> _Check:
+    """A JSON array of at most `limit` integers, each in lo..hi."""
+
+    def check(value: Any, where: str) -> list[int]:
+        if not isinstance(value, list):
+            raise _wrong(where, "a list of integers", value)
+        if len(value) > limit:
+            raise ProtocolError(f"{where} has {len(value)} entries; the limit is {limit}")
+        for x in value:
+            if isinstance(x, bool) or not isinstance(x, int) or not lo <= x <= hi:
+                raise _wrong(where, f"a list of integers in {lo}..{hi}", x)
+        return list(value)
+
+    return check
+
+
 def _optional(check: _Check) -> _Check:
     """`check`, plus null (None), which means "leave this as it is"."""
 
@@ -271,6 +361,7 @@ _RULES: dict[type[Message], dict[str, _Check]] = {
     Heartbeat: {},
     Estop: {"reason": _text},
     ClearEstop: {},
+    Subscribe: {"safety": _boolean, "scan": _boolean},
     Hello: {
         "counts_per_rev": _positive_int,
         "wheel_radius_m": _positive,
@@ -290,8 +381,24 @@ _RULES: dict[type[Message], dict[str, _Check]] = {
         "battery": _number,
         "estop": _boolean,
         "watchdog_tripped": _boolean,
+        "bubble": _optional(_bubble_state),
+        "bubble_reason": _optional(_text),
+        "nearest_m": _optional(_nonneg),
+        "stop_m": _optional(_nonneg),
+        "yaw": _optional(_number),
+    },
+    Scan: {
+        "t": _number,
+        "step_deg": _positive,
+        "ranges_cm": _int_list(MAX_SCAN_BINS, 0, 65535),
+        "near": _int_list(MAX_SCAN_BINS, 0, MAX_SCAN_BINS - 1),
     },
     Error: {"reason": _text},
+}
+# Fields left off the line when None, so a message without them is
+# byte-identical to what a v1 peer sends and expects.
+_OMIT_IF_NONE: dict[type[Message], tuple[str, ...]] = {
+    State: ("bubble", "bubble_reason", "nearest_m", "stop_m", "yaw"),
 }
 _BY_TYPE: dict[str, type[Message]] = {cls.TYPE: cls for cls in _RULES}
 _REQUIRED: dict[type[Message], tuple[str, ...]] = {
@@ -388,7 +495,17 @@ def _checked_fields(cls: type[Message], obj: dict[str, Any]) -> dict[str, Any]:
     missing = [name for name in _REQUIRED[cls] if name not in given]
     if missing:
         raise ProtocolError(f"{cls.TYPE} is missing required field(s) {_names(missing)}")
-    return {name: rules[name](value, f"{cls.TYPE}.{name}") for name, value in given.items()}
+    checked = {name: rules[name](value, f"{cls.TYPE}.{name}") for name, value in given.items()}
+    _check_across_fields(cls, checked)
+    return checked
+
+
+def _check_across_fields(cls: type[Message], values: dict[str, Any]) -> None:
+    """Rules that tie one field to another, for encode and decode alike."""
+    if cls is Scan:
+        bins = len(values.get("ranges_cm", []))
+        if any(i >= bins for i in values.get("near", [])):
+            raise ProtocolError("scan.near refers to a bin past the end of ranges_cm")
 
 
 # --- error text: short, specific, and never an error itself ------------------------------

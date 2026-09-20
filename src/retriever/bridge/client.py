@@ -8,14 +8,22 @@ is how odometry misses an encoder rollover. A heartbeat thread keeps an idle-but
 laptop from tripping the Pi's watchdog, and a dead laptop takes its heartbeat with it.
 observe() refuses stale state, because steering on a frozen picture is worse than
 stopping, and act() refuses sideways velocity before it leaves the laptop.
+
+Lidar safety bubble (optional): right after the handshake BridgeRobot sends
+`subscribe`, so a Pi with a lidar adds the bubble's state to every `state` and
+streams a downsampled `scan`. `bubble`, `scan` and `lidar_view()` expose them;
+all are None when the Pi has no lidar or predates the extension (an old Pi
+answers `subscribe` with an error, which is recognised and swallowed).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import socket
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from retriever.bridge.protocol import (
@@ -30,7 +38,9 @@ from retriever.bridge.protocol import (
     Hello,
     Message,
     ProtocolError,
+    Scan,
     State,
+    Subscribe,
     decode,
     encode,
 )
@@ -45,6 +55,42 @@ _LOCALHOST = "127.0.0.1"
 
 class BridgeError(ConnectionError):
     """The link to the Pi is not usable; the message says why, in words."""
+
+
+@dataclass(frozen=True)
+class BubbleStatus:
+    """The Pi's lidar safety bubble, as of the last state."""
+
+    state: str                  # clear | slowing | blocked | stale
+    reason: str
+    nearest_m: float | None     # body -> nearest obstacle; None without a fresh scan
+    stop_m: float | None        # body clearance the current command needs
+    t: float                    # bridge time of that state
+
+
+@dataclass(frozen=True)
+class ScanView:
+    """The last downsampled revolution, in the BASE frame (x forward, y left)."""
+
+    t: float                                        # bridge time (State.t clock)
+    received: float                                 # time.monotonic() on arrival
+    points: tuple[tuple[float, float, bool], ...]   # (x_m, y_m, inside the stop distance)
+
+    def age(self) -> float:
+        return time.monotonic() - self.received
+
+
+def scan_points(scan: Scan) -> tuple[tuple[float, float, bool], ...]:
+    """Scan bins -> base-frame points at each bin's centre bearing."""
+    near = set(scan.near)
+    step = math.radians(scan.step_deg)
+    out = []
+    for i, cm in enumerate(scan.ranges_cm):
+        if cm <= 0:
+            continue
+        a, r = (i + 0.5) * step, cm / 100.0
+        out.append((r * math.cos(a), r * math.sin(a), i in near))
+    return tuple(out)
 
 
 def parse_address(addr: str, default_port: int = DEFAULT_PORT) -> tuple[str, int]:
@@ -76,9 +122,18 @@ class BridgeRobot:
         stale_after_s: float = 1.0,
         heartbeat_hz: float = 10.0,
         geo: TankGeometry | None = None,
+        subscribe: bool = True,
+        scrub_factor: float | None = None,
     ) -> None:
+        """subscribe: ask for the lidar extensions (harmless on any Pi). False
+        behaves byte for byte like a client from before they existed.
+        scrub_factor: use this instead of the Pi's for ODOMETRY only (a fresh
+        calibration, before it is set on the Pi). Closed-loop driving steers by
+        odometry, so this alone makes click-to-go turn by the right amount."""
         if not heartbeat_hz > 0.0:
             raise ValueError(f"heartbeat_hz must be positive, got {heartbeat_hz!r}")
+        if scrub_factor is not None and not (math.isfinite(scrub_factor) and scrub_factor > 0):
+            raise ValueError(f"scrub_factor must be a positive number, got {scrub_factor!r}")
         self._where = _join(host, port)
         self._observe_timeout_s = observe_timeout_s
         self._stale_after_s = stale_after_s
@@ -91,15 +146,19 @@ class BridgeRobot:
         self._states_received = 0
         self._link_down: str | None = None  # why the link is unusable, once it is
         self.last_error: str | None = None  # the Pi's latest Error reason
+        self._scan: ScanView | None = None
+        self.lidar_supported: bool | None = None     # False: the Pi refused `subscribe`
         self._sock = _connect(host, port, connect_timeout_s, self._where)
         self._lines = self._sock.makefile("rb")
         try:
             self._hello = self._read_hello(connect_timeout_s)
             # The Pi owns these numbers; `geo` exists only to override them on purpose.
             self._odometry = TankOdometry(
-                geo if geo is not None else _geometry_of(self._hello),
+                geo if geo is not None else _geometry_of(self._hello, scrub_factor),
                 self._hello.counts_per_rev,
             )
+            if subscribe:
+                self._send(Subscribe())
         except BaseException:
             self._lines.close()
             self._sock.close()
@@ -229,6 +288,39 @@ class BridgeRobot:
         return self._hello
 
     @property
+    def odometry(self) -> TankOdometry:
+        """The odometry this laptop integrates, and the geometry it uses (odometry.geo)."""
+        return self._odometry
+
+    @property
+    def bubble(self) -> BubbleStatus | None:
+        """The Pi's safety bubble, or None (no lidar on the Pi, or not subscribed)."""
+        s = self.state
+        if s is None or s.bubble is None:
+            return None
+        return BubbleStatus(s.bubble, s.bubble_reason or "", s.nearest_m, s.stop_m, s.t)
+
+    @property
+    def scan(self) -> ScanView | None:
+        """The last lidar scan the Pi sent, base frame, or None."""
+        with self._changed:
+            return self._scan
+
+    def lidar_view(self) -> dict[str, Any] | None:
+        """Plain data for the dashboard: base-frame points and the bubble."""
+        scan, bubble = self.scan, self.bubble
+        if scan is None and bubble is None:
+            return None
+        return {
+            "points": [[x, y, near] for x, y, near in scan.points] if scan else [],
+            "age_s": scan.age() if scan else None,
+            "bubble": None if bubble is None else {
+                "state": bubble.state, "reason": bubble.reason,
+                "nearest_m": bubble.nearest_m, "stop_m": bubble.stop_m,
+            },
+        }
+
+    @property
     def connected(self) -> bool:
         """Whether the link is still up."""
         with self._changed:
@@ -277,20 +369,34 @@ class BridgeRobot:
             return
         if isinstance(msg, State):
             self._on_state(msg)
-        elif isinstance(msg, Error):
-            logger.warning("the Pi says: %s", msg.reason)
+        elif isinstance(msg, Scan):
             with self._changed:
-                self.last_error = msg.reason
+                self._scan = ScanView(msg.t, time.monotonic(), scan_points(msg))
+                self.lidar_supported = True
+        elif isinstance(msg, Error):
+            if "'subscribe'" in msg.reason:
+                with self._changed:
+                    self.lidar_supported = False     # a Pi from before the extension
+            else:
+                logger.warning("the Pi says: %s", msg.reason)
+                with self._changed:
+                    self.last_error = msg.reason
         else:
             logger.warning("ignored an unexpected %r from the Pi", msg.TYPE)
 
     def _on_state(self, state: State) -> None:
         with self._changed:
             previous = self._state
+            # state.yaw: the Pi's gyro heading, when it has one. Rotation from it,
+            # distance from the wheels (odometry.TankOdometry.update).
             if previous is None:
-                self._odometry.update(state.left_ticks, state.right_ticks, 0.0)  # records only
+                self._odometry.update(
+                    state.left_ticks, state.right_ticks, 0.0, state.yaw
+                )  # records only
             elif state.t > previous.t:
-                self._odometry.update(state.left_ticks, state.right_ticks, state.t - previous.t)
+                self._odometry.update(
+                    state.left_ticks, state.right_ticks, state.t - previous.t, state.yaw
+                )
             self._state = state
             self._state_received_at = time.monotonic()
             self._states_received += 1
@@ -344,8 +450,10 @@ def _connect(host: str, port: int, timeout_s: float, where: str) -> socket.socke
     return sock
 
 
-def _geometry_of(hello: Hello) -> TankGeometry:
-    return TankGeometry(hello.wheel_radius_m, hello.track_width_m, hello.scrub_factor)
+def _geometry_of(hello: Hello, scrub_factor: float | None = None) -> TankGeometry:
+    return TankGeometry(
+        hello.wheel_radius_m, hello.track_width_m, scrub_factor or hello.scrub_factor
+    )
 
 
 def _port(text: str, addr: str) -> int:
