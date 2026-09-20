@@ -1,3 +1,16 @@
+diff --git a/src/lerobot/motors/motors_bus.py b/src/lerobot/motors/motors_bus.py
+index 509f5e95..e391f773 100644
+--- a/src/lerobot/motors/motors_bus.py
++++ b/src/lerobot/motors/motors_bus.py
+@@ -454,7 +454,7 @@ class SerialMotorsBus(MotorsBusBase):
+ 
+         found_models = {}
+         for id_ in self.ids:
+-            model_nb = self.ping(id_)
++            model_nb = self.ping(id_, num_retry=3)
+             if model_nb is not None:
+                 found_models[id_] = model_nb
+ 
 diff --git a/src/lerobot/robots/so_follower/so_follower.py b/src/lerobot/robots/so_follower/so_follower.py
 index ac49a91d..bdede900 100644
 --- a/src/lerobot/robots/so_follower/so_follower.py
