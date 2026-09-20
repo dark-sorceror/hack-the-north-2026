@@ -27,7 +27,9 @@ from retriever.bridge.protocol import (
     Hello,
     ProtocolError,
     ProtocolVersionError,
+    Scan,
     State,
+    Subscribe,
     decode,
     encode,
 )
@@ -69,9 +71,11 @@ SAMPLES = (
     Estop(reason="operator pressed the red button"),
     Estop(),
     ClearEstop(),
+    Subscribe(),
     HELLO,
     STATE,
     BARE_STATE,
+    Scan(t=1234.5, step_deg=2.0, ranges_cm=[0, 12, 65535], near=[1]),
     Error(reason="'state' is not valid in this direction"),
 )
 
