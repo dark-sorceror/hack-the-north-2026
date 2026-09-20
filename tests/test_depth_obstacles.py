@@ -352,6 +352,27 @@ class TestCheck(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("almost no valid cells", "\n".join(lines))
 
+    def test_derived_intrinsics_are_flagged_but_do_not_block(self):
+        """A board that reaches the camera through QNX's Sensor Framework cannot
+        get factory calibration out of it, so it derives the intrinsics from the
+        datasheet field of view. That is usable, and the operator has to be told
+        which they got."""
+        header = camstream_header()
+        header["depth"]["intrinsics"]["source"] = "qnx-camtap-fov"
+        ready, lines = self.run_check(StubRemote(header, self.packet(render(MOUNT))))
+        text = "\n".join(lines)
+        self.assertTrue(ready, text)
+        self.assertIn("qnx-camtap-fov", text)
+        self.assertIn("calibrate", text)
+
+    def test_factory_intrinsics_draw_no_warning(self):
+        header = camstream_header()
+        header["depth"]["intrinsics"]["source"] = "librealsense-depth"
+        ready, lines = self.run_check(StubRemote(header, self.packet(render(MOUNT))))
+        text = "\n".join(lines)
+        self.assertTrue(ready, text)
+        self.assertNotIn("not the camera's factory", text)
+
     def test_a_placeholder_mount_is_flagged_but_does_not_block(self):
         ready, lines = self.run_check(
             StubRemote(camstream_header(), self.packet(render(DEFAULT_MOUNT))), DEFAULT_MOUNT)
