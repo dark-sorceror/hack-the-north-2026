@@ -18,6 +18,7 @@ MIN_FREE_GB="${MIN_FREE_GB:-10}"
 EXPECTED_SITES=3
 FOLLOWER_REL="src/lerobot/robots/so_follower/so_follower.py"
 LEADER_REL="src/lerobot/teleoperators/so_leader/so_leader.py"
+BUS_REL="src/lerobot/motors/motors_bus.py"
 
 CAL_DIR="$HOME/.cache/huggingface/lerobot/calibration"
 FOLLOWER_CAL="$CAL_DIR/robots/so_follower/my_follower_arm.json"
@@ -75,6 +76,7 @@ info "HEAD is $(git -C "$INSTALL_DIR" rev-parse --short HEAD) (detached, as inte
 cd "$INSTALL_DIR"
 [ -f "$FOLLOWER_REL" ] || die "missing $FOLLOWER_REL - layout changed, patch would silently no-op"
 [ -f "$LEADER_REL" ]   || die "missing $LEADER_REL - layout changed, patch would silently no-op"
+[ -f "$BUS_REL" ]      || die "missing $BUS_REL - layout changed, patch would silently no-op"
 
 # ---------------------------------------------------------------- uv sync --
 step "uv sync (pulls torch - slow on shared wifi)"
@@ -101,12 +103,20 @@ step "Apply sync_read retry patch (num_retry=3)"
 sed -i 's/self\.bus\.sync_read("Present_Position")/self.bus.sync_read("Present_Position", num_retry=3)/g' \
   "$FOLLOWER_REL" "$LEADER_REL"
 
+# Same bug at connect time: _assert_motors_exist pings each motor once with
+# num_retry=0, so one dropped reply fails the whole connect with "Missing motor
+# IDs" - the phantom missing-motor symptom. 2% loss on a single servo was
+# enough to trigger it. ping() already accepted num_retry; it just never asked.
+sed -i 's/model_nb = self\.ping(id_)/model_nb = self.ping(id_, num_retry=3)/' "$BUS_REL"
+
 patched=$(grep -o 'sync_read("Present_Position", num_retry=3)' "$FOLLOWER_REL" "$LEADER_REL" | wc -l)
 unpatched=$(grep -o 'sync_read("Present_Position")' "$FOLLOWER_REL" "$LEADER_REL" | wc -l || true)
+pinged=$(grep -c 'ping(id_, num_retry=3)' "$BUS_REL" || true)
 
-info "patched:   $patched (expect $EXPECTED_SITES)"
-info "unpatched: $unpatched (expect 0)"
-[ "$patched" -eq "$EXPECTED_SITES" ] && [ "$unpatched" -eq 0 ] \
+info "patched:    $patched (expect $EXPECTED_SITES)"
+info "unpatched:  $unpatched (expect 0)"
+info "ping retry: $pinged (expect 1)"
+[ "$patched" -eq "$EXPECTED_SITES" ] && [ "$unpatched" -eq 0 ] && [ "$pinged" -eq 1 ] \
   || die "patch verification failed - do NOT run the arm until this is resolved"
 
 git --no-pager diff --stat
