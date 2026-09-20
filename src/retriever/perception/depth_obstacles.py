@@ -302,6 +302,11 @@ def check(source: CameraObstacleSource, seconds: float = 3.0, poll_s: float = 0.
         intr, size = found
         lines.append(f"ok depth intrinsics: fx {intr.fx:.1f}, fy {intr.fy:.1f} at "
                      f"{size[0]}x{size[1]}, not aligned to colour")
+        origin = ((header.get("depth") or {}).get("intrinsics") or {}).get("source", "")
+        if origin and "librealsense" not in origin:
+            lines.append(f"?? those intrinsics are derived ({origin}), not the camera's factory "
+                         f"calibration: QNX's Sensor Framework does not expose it. Ranges are "
+                         f"good to a few cm at 3 m; run `calibrate` on open floor to pin the mount.")
     if not seen:
         lines.append(f"!! no messages in {seconds:.1f} s: the publisher is reachable but silent.")
         lines.append("NOT READY")
