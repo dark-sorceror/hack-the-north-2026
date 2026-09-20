@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-shot Pi setup. Run ON the Pi, from ~/retriever:
 #
-#   bash pi/setup.sh                  # bridge with the FAKE wheels, on every boot
-#   bash pi/setup.sh --driver real    # the real DDSM115 wheels (any fake_pi.py flags work)
+#   bash nav-pi/setup.sh                  # bridge with the FAKE wheels, on every boot
+#   bash nav-pi/setup.sh --driver real    # the real DDSM115 wheels (any fake_pi.py flags work)
 #
 # Rehearsed on the Pi 4 so the Pi 5 is a repeat, not an experiment. Idempotent:
 # safe to run again after pulling new code.
@@ -85,7 +85,7 @@ echo i2c-dev | sudo tee /etc/modules-load.d/retriever-i2c.conf > /dev/null
 sudo modprobe i2c-dev 2>/dev/null || true
 
 # The D435i's gyro (/dev/hidrawN) for the group plugdev, instead of root only.
-sudo install -m 0644 "$HERE/pi/99-retriever-d435i.rules" /etc/udev/rules.d/99-retriever-d435i.rules
+sudo install -m 0644 "$HERE/nav-pi/99-retriever-d435i.rules" /etc/udev/rules.d/99-retriever-d435i.rules
 sudo udevadm control --reload
 sudo udevadm trigger --subsystem-match=hidraw || true
 
@@ -108,7 +108,7 @@ fi
 
 sed -e "s|__USER__|$USER|" -e "s|__HOME__|$HOME|" -e "s|__BRIDGE_ARGS__|$BRIDGE_ARGS|" \
     -e "s|^SupplementaryGroups=.*|SupplementaryGroups=$GROUPS_OK|" \
-    "$HERE/pi/retriever-bridge.service" \
+    "$HERE/nav-pi/retriever-bridge.service" \
   | { if [ -z "$GROUPS_OK" ]; then grep -v '^SupplementaryGroups='; else cat; fi; } \
   | sudo tee /etc/systemd/system/retriever-bridge.service > /dev/null
 sudo systemctl daemon-reload

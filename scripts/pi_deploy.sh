@@ -8,7 +8,7 @@
 #
 # Steps, each bounded in time and failing fast with the reason:
 #   1. preflight   scripts/pi_doctor.sh: can we reach the Pi at all, and if not, why
-#   2. sync        rsync src/ scripts/ pi/ tests/ -> ~/retriever on the Pi
+#   2. sync        rsync src/ scripts/ nav-pi/ tests/ -> ~/retriever on the Pi
 #   3. tests       the Pi-side stdlib test subset, on the Pi's own Python
 #   4. --run       restart the bridge in the background, no sudo: nohup + pidfile + log
 #                  in ~/retriever/run/, then wait until it answers FROM THE LAPTOP
@@ -29,7 +29,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 
 REMOTE_DIR=retriever                  # relative to the Pi user's home
 TEST_MODULES="tests.test_protocol tests.test_bridge tests.test_tank_backend tests.test_gpio tests.test_drivers tests.test_odometry"
-SYNC_DIRS="src scripts pi tests"
+SYNC_DIRS="src scripts nav-pi tests"
 
 usage() {
   cat <<'EOF'
@@ -38,7 +38,7 @@ usage: scripts/pi_deploy.sh [--host HOST] [--user USER] [--port PORT]
                             [--bind ADDR] [--no-preflight] [--no-sync] [-- FAKE_PI_ARGS...]
 
 Deploy the bridge to the Raspberry Pi and check it, in one command:
-  preflight (pi_doctor.sh) -> rsync src/ scripts/ pi/ tests/ to ~/retriever
+  preflight (pi_doctor.sh) -> rsync src/ scripts/ nav-pi/ tests/ to ~/retriever
   -> Pi-side tests -> [--run: restart the bridge] -> [--link-test N: link check]
 
   --host HOST        Pi host name or address; USER@HOST works too   (default hao.local)

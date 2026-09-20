@@ -1,4 +1,4 @@
 # The D435i's motion module (gyro + accel) as /dev/hidrawN, readable by the
 # bridge without root: bridge/imu.py reads the gyro from it for heading.
-# Installed by pi/setup.sh; the bridge's service runs with group plugdev.
+# Installed by nav-pi/setup.sh; the bridge's service runs with group plugdev.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", MODE="0660", GROUP="plugdev"

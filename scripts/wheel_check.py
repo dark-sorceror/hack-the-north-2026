@@ -17,7 +17,7 @@ robot's mirror-mounted pair, measured) get -RPM on the wire. `sides` checks exac
 the mapping the bridge uses (DDSM115Driver) and prints the flags to pass.
 
 Port: --port, else $DDSM115_PORT, else the one WCH (USB VID 1a86) adapter.
-Needs pyserial (pi/setup.sh installs it on the Pi). Options go
+Needs pyserial (nav-pi/setup.sh installs it on the Pi). Options go
 AFTER the subcommand. Stop the bridge first: the port is opened exclusively,
 so a second program is refused rather than becoming a second bus master.
 """
