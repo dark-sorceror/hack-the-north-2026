@@ -393,6 +393,37 @@ class TestFollower(unittest.TestCase):
                 first = list(ctl.path)
         self.assertLessEqual(flips, 1, f"route flipped sides {flips} times while standing still")
 
+    def test_the_robots_own_hardware_never_reaches_the_map(self):
+        """Brackets and the arm sit just outside the chassis and return in
+        almost every scan. Mapped, they become a wall that rides along with the
+        robot: clutter at its own edge, and a clearance-based speed limit held
+        down for an obstacle that is not there."""
+        from retriever.teleop import TeleopSession
+        m, _ = self.mapper()
+        session = TeleopSession.__new__(TeleopSession)     # no threads, no robot
+        session.mapper = m
+        session.map_skipped = 0
+        session.map_min_range_m = 0.45
+        session._seen = type("S", (), {"wz": 0.0})()
+        scan = type("Scan", (), {"t": 0.0, "points": [
+            (0.30, -0.22),        # a bracket off the right side: 0.37 m out
+            (0.40, -0.10),        # the arm, 0.41 m out
+            (1.60, 0.20),         # a real wall
+        ]})()
+        session._pose_at = lambda t: (Pose(), 0.0)
+        session._map_scan(scan)
+        occupied = [(x, y) for (x, y) in m.grid.occupied_points()] if hasattr(
+            m.grid, "occupied_points") else None
+        if occupied is None:                               # fall back to the grid mask
+            import numpy as np
+            ys, xs = np.nonzero(m.grid.occupied())
+            occupied = [(m.grid.x0 + (ix + 0.5) * m.grid.res,
+                         m.grid.y0 + (iy + 0.5) * m.grid.res) for iy, ix in zip(ys, xs)]
+        self.assertTrue(occupied, "the real wall should have been mapped")
+        for x, y in occupied:
+            self.assertGreater(math.hypot(x, y), 0.45,
+                               f"mapped {x:.2f},{y:.2f}: that is the robot itself")
+
     def test_waits_when_the_map_goes_stale(self):
         m, clock = self.mapper()
         m.add_scan(Pose(), [(x, y) for x, y in room()])

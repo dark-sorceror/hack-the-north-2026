@@ -294,6 +294,7 @@ class TeleopSession:
         mapping: bool = True,
         camera: Any = None,
         camera_url: str | None = None,
+        map_min_range_m: float = 0.0,
     ) -> None:
         """mapping: build a map from the lidar's scans (needs numpy), and plan
         click-to-go routes over it. Off, or no numpy: avoid.py steering only.
@@ -322,6 +323,14 @@ class TeleopSession:
         self.camera = camera
         self._camera_t: float | None = None
         self.camera_url = camera_url      # an MJPEG stream for the page (cam_stream.py)
+        # Returns this close to the lidar never reach the MAP. Brackets, the arm
+        # and cable runs sit just outside the chassis and come back in nearly
+        # every scan; mapped, they become a wall that rides along with the robot
+        # -- which shows as clutter at its own edge and, worse, holds the
+        # clearance-based speed limit down for an obstacle that is not there.
+        # The safety bubble on the Pi is NOT filtered by this: it keeps full
+        # close-range sight for stopping, with its own per-sector self-mask.
+        self.map_min_range_m = float(map_min_range_m)
         self._last_cmd = Action()
         self._threads: list[threading.Thread] = []
         self._obs: Any = None                  # the latest Observation, for click-to-go
@@ -856,7 +865,9 @@ class TeleopSession:
             self.map_skipped += 1
             return
         try:
-            self.mapper.add_scan(pose, [(x, y) for x, y, *_ in scan.points])
+            near = self.map_min_range_m
+            self.mapper.add_scan(pose, [(x, y) for x, y, *_ in scan.points
+                                        if math.hypot(x, y) >= near])
         except Exception:   # a map bug must not take the observe loop (odometry) down
             self.map_skipped += 1
 
