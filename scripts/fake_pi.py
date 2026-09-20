@@ -41,6 +41,7 @@ from retriever.bridge.drivers import (  # noqa: E402
 )
 from retriever.bridge.fake_driver import FakeTankDriver  # noqa: E402
 from retriever.bridge.gpio import EstopButton, VacuumOverlay, VacuumRelay  # noqa: E402
+from retriever.bridge.power import PowerMonitor  # noqa: E402
 from retriever.bridge.protocol import DEFAULT_PORT  # noqa: E402
 from retriever.bridge.safety import add_lidar_args, lidar_from_args  # noqa: E402
 from retriever.bridge.server import BridgeServer, HardwareDriver  # noqa: E402
@@ -154,6 +155,13 @@ def main(argv: list[str] | None = None) -> int:
         geo = TankGeometry(args.wheel_radius, args.track_width, args.scrub_factor)
         driver = build_driver(args, geo, relay)
         lidar, bubble = lidar_from_args(args, driver)   # (None, None) unless asked for
+        # The Pi's own supply. Off a Pi (vcgencmd missing) this reads unavailable
+        # and nothing is sent, so the sim is unaffected.
+        power = PowerMonitor()
+        if power.available:
+            logger.info("power: 5 V rail %s, undervoltage %s",
+                        "unknown" if power.volts is None else f"{power.volts:.2f} V",
+                        "YES" if power.undervoltage else "no")
         # A gyro gives heading that ignores the skid-steer's wheel slip: the robot's
         # own MPU-6050/9250 (bridge/mpu.py), or the camera's IMU (bridge/imu.py).
         if args.imu != "none":
@@ -200,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
             bubble=bubble,
             scan_hz=args.scan_hz,
             imu=imu,
+            power=power,
         )
     except (ConnectionError, FileNotFoundError, ImportError, NotImplementedError,
             RuntimeError, ValueError) as exc:
