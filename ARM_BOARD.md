@@ -251,16 +251,19 @@ press `q`**, so it is not usable on the robot. Keep it for bench testing only.
 ## 8. Status — read this before integrating
 
 **Working and tested on hardware:**
+- `fetch.py` — runs autonomously, grasps the object, and exits with the gripper
+  locked onto it. No operator, no keypress. This is the path to integrate against.
 - ACT policy inference; picks up the goose, and recovers after a failed grasp
 - The handoff pose, including with the gripper latched in overload
-- Checkpoints at 10k and 20k steps (`~/checkpoints/checkpoints/{010000,020000}/`)
+- Checkpoints at 10k and 20k steps (`~/checkpoints/checkpoints/{010000,020000}/`).
+  20k is the default and is marginally better than 10k.
 
-**Written, imports verified, NOT yet run on hardware:**
-- `fetch.py` itself. It replaces a workflow that required a human keypress, and
-  its grasp detection defaults to "the gripper stopped responding", which is
-  what a successful grasp looks like on this arm — but that has not been
-  exercised end to end yet. **Test it before you depend on it.** The older
-  `run_goose.sh` path is proven but needs an operator.
+**Working but not tuned:**
+- Grasp detection currently fires on the gripper's overload trip (it stops
+  answering register reads). That is reliable in practice but is a protection
+  fault, not a designed signal. `--grip-threshold N` would trigger earlier on
+  measured load instead; the value has not been chosen from real telemetry yet.
+  Every `step` event logs `grip_raw` so it can be set later.
 
 **Planned, not built:**
 - A WebSocket action server on the board so the Pi5 can trigger these over the
