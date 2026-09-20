@@ -40,9 +40,11 @@ class CameraObstacleConfig:
     kth: int = 3                 # per bin, the kth-nearest point: one bad pixel is not an obstacle
 
 
-# Where the D435i sits on the robot. PLACEHOLDERS: measure them, or point the
-# camera at open floor and fit the height and tilt with `fit_floor`.
-DEFAULT_MOUNT = CameraMount(height_m=0.30, forward_m=0.20, pitch_rad=0.15)
+# Where the D435i sits on the robot: about 15 cm above the floor on the platform
+# (measured 2026-09-19). The forward offset and the tilt are still placeholders:
+# measure the first, and get the other two from a view of open floor with
+# `calibrate` (or `fit_floor` on a grid you already have).
+DEFAULT_MOUNT = CameraMount(height_m=0.15, forward_m=0.20, pitch_rad=0.0)
 
 
 def grid_intrinsics(intr: Intrinsics, cell_px: int) -> Intrinsics:
