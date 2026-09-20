@@ -283,6 +283,116 @@ class TestFollower(unittest.TestCase):
         self.assertIsNotNone(ctl.failure)
         self.assertIn("way there", ctl.failure[0])
 
+    def test_a_carrot_just_inside_the_rotate_angle_still_moves(self):
+        """The stall found on the robot: alpha a hair under rotate_deg made the
+        alignment ramp zero, and wz = v * curvature made that zero too, so it
+        commanded 4 mm/s and no turn and sat there until the goal timed out."""
+        m, _ = self.mapper()
+        m.add_scan(Pose(), [(x, y) for x, y in room()])
+        cfg = FollowConfig()
+        ctl = PathFollower(m, Limits(v_max=0.3, w_max=1.0, pos_tol=0.08), cfg)
+        for off_deg in (cfg.rotate_deg - 0.1, cfg.rotate_deg - 2.0, cfg.rotate_deg - 8.0):
+            with self.subTest(off_deg=off_deg):
+                ctl.path = [(0.0, 0.0), (2.0, 0.0)]
+                pose = Pose(0.0, 0.0, math.radians(off_deg))   # nose off the route by ~55 deg
+                a, _ = ctl.step_observation(
+                    Observation(joints={}, base=pose, t=0.0), Pose(2.0, 0.0, 0.0))
+                turning = abs(a.base_wz) > 0.05           # it closes the angle...
+                driving = a.base_vx > cfg.creep_mps       # ...or it makes real progress
+                self.assertTrue(turning or driving,
+                                f"stalled at {off_deg:.1f} deg: vx={a.base_vx:.4f} wz={a.base_wz:.4f}")
+
+    def test_backs_off_turning_so_the_retry_starts_from_a_better_angle(self):
+        """Backing straight out keeps the heading that got it stuck, so it wedges
+        against the next thing along. It should swing the nose toward the route
+        as it reverses: a three-point turn."""
+        m, _ = self.mapper()
+        m.add_scan(Pose(), [(x, y) for x, y in room()])
+
+        class Blocked:                                   # the Pi's bubble, refusing
+            state = "blocked"
+
+        cfg = FollowConfig(backoff_after_s=0.5, backoff_s=1.0)
+        ctl = PathFollower(m, Limits(v_max=0.3, w_max=1.0, pos_tol=0.08), cfg,
+                           bubble=lambda: Blocked())
+        pose, goal = Pose(0.0, 0.0, 0.0), Pose(1.0, 1.4, 0.0)   # route heads off to the left
+        t = 0.0
+        for i in range(20):                              # blocked -> backoff starts
+            t = i * 0.1
+            ctl.step_observation(Observation(joints={}, base=pose, t=t), goal)
+            if ctl._backoff_until is not None:
+                break
+        self.assertIsNotNone(ctl._backoff_until, "never backed off")
+        act, _ = ctl.step_observation(                   # the step AFTER it decides to
+            Observation(joints={}, base=pose, t=t + 0.1), goal)
+        self.assertLess(act.base_vx, 0.0, "backed off without reversing")
+        self.assertGreater(act.base_wz, 0.05,
+                           f"reversed straight instead of turning toward the route: {act}")
+
+        off = FollowConfig(backoff_after_s=0.5, backoff_s=1.0, reverse_to_turn=False)
+        ctl2 = PathFollower(m, Limits(v_max=0.3, w_max=1.0, pos_tol=0.08), off,
+                            bubble=lambda: Blocked())
+        t = 0.0
+        for i in range(20):
+            t = i * 0.1
+            ctl2.step_observation(Observation(joints={}, base=pose, t=t), goal)
+            if ctl2._backoff_until is not None:
+                break
+        act2, _ = ctl2.step_observation(
+            Observation(joints={}, base=pose, t=t + 0.1), goal)
+        self.assertLess(act2.base_vx, 0.0)
+        self.assertEqual(act2.base_wz, 0.0, "reverse_to_turn=False should reverse straight")
+
+    def test_backs_off_when_the_bubble_refuses_every_other_tick(self):
+        """The limit cycle seen on the robot: refused -> stop -> a stopped robot
+        is safe -> bubble clear -> try again -> refused. Blocked and clear ticks
+        alternated, so a symmetric counter never reached the backoff threshold
+        and it flickered between "following" and "the bubble stopped me"."""
+        m, _ = self.mapper()
+        m.add_scan(Pose(), [(x, y) for x, y in room()])
+        flip = {"n": 0}
+
+        class Flapping:
+            @property
+            def state(self):
+                flip["n"] += 1
+                return "blocked" if flip["n"] % 2 else "clear"
+
+        ctl = PathFollower(m, Limits(v_max=0.3, w_max=1.0, pos_tol=0.08),
+                           FollowConfig(backoff_after_s=0.8),
+                           bubble=lambda: Flapping())
+        pose, goal = Pose(0.0, 0.0, 0.0), Pose(1.0, 1.4, 0.0)
+        for i in range(120):                              # 6 s at 20 Hz
+            ctl.step_observation(Observation(joints={}, base=pose, t=i * 0.05), goal)
+            if ctl._backoff_until is not None:
+                break
+        self.assertIsNotNone(ctl._backoff_until,
+                             "never backed off: blocked and clear ticks cancelled out")
+
+    def test_sticks_to_a_route_instead_of_flipping_between_equal_ones(self):
+        """Two ways round are often within a few percent, and scan noise flips
+        the winner twice a second: the robot turns one way, then the other, and
+        gains no ground. A committed route is kept unless clearly beaten."""
+        m, _ = self.mapper()
+        world = CHAIR + room()
+        m.add_scan(Pose(), [(x, y) for x, y in world])
+        ctl = PathFollower(m, Limits(v_max=0.3, w_max=1.0, pos_tol=0.08))
+        pose, goal = Pose(0.0, 0.0, 0.0), Pose(2.45, 0.55, 0.0)
+        ctl.step_observation(Observation(joints={}, base=pose, t=0.0), goal)
+        first = list(ctl.path or [])
+        self.assertTrue(first, "no route at all")
+        side = lambda path: sum(y for _, y in path)      # which way round it goes
+
+        flips = 0
+        for i in range(1, 25):                            # 12 s of re-planning
+            m.add_scan(Pose(), [(x, y) for x, y in world])   # same room, fresh scans
+            ctl._planned_at = -math.inf                   # force a replan every step
+            ctl.step_observation(Observation(joints={}, base=pose, t=i * 0.5), goal)
+            if ctl.path and (side(ctl.path) > 0) != (side(first) > 0):
+                flips += 1
+                first = list(ctl.path)
+        self.assertLessEqual(flips, 1, f"route flipped sides {flips} times while standing still")
+
     def test_waits_when_the_map_goes_stale(self):
         m, clock = self.mapper()
         m.add_scan(Pose(), [(x, y) for x, y in room()])
