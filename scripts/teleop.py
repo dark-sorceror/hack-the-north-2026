@@ -87,6 +87,14 @@ def main() -> int:
                     help="MJPEG stream to show on the page. 'auto' (default) points at the "
                          "robot Pi's port 8790, where scripts/cam_stream.py serves it; "
                          "'off' hides the panel")
+    ap.add_argument("--clearance", type=float, default=0.02, metavar="M",
+                    help="metres the route keeps clear PAST the body (default 0.02). The "
+                         "bubble still sweeps the real footprint, so this only decides how "
+                         "narrow a gap a route may aim at")
+    ap.add_argument("--wide-gaps", action="store_true",
+                    help="plan with the circumscribed radius (clear at every heading, so it "
+                         "can always turn on the spot) instead of the body half width: "
+                         "safer, but it refuses gaps the robot actually fits through")
     ap.add_argument("--no-open", action="store_true", help="don't open a browser tab")
     args = ap.parse_args()
 
@@ -133,6 +141,8 @@ def main() -> int:
         camera_url = args.camera
 
     session = TeleopSession(connect, config, recorder, footprint=footprint,
+                            tight_gaps=not args.wide_gaps,
+                            clearance_m=args.clearance,
                             camera_url=camera_url, claw_m=args.claw,
                             map_min_range_m=args.map_min_range).start()
     try:

@@ -203,7 +203,12 @@ class DriveRecorder:
 # ------------------------------------------------------------------ session
 
 
-ARRIVE_M = 0.08          # click-to-go is done this close to the spot (position only)
+# Click-to-go is done this close to the spot (position only). 8 cm was asking
+# for more precision than the frame has: the goal is in the ODOMETRY frame, and
+# by the time the robot is there the frame has drifted by more than that, so
+# fighting for the last few centimetres chases a point that is no longer where
+# the map says it is. Close enough, and stop.
+ARRIVE_M = 0.15
 FACE_TOL_RAD = 0.05      # a leg that ends facing a heading is done within ~3 degrees
 FACE_MIN_WZ = 0.25       # rad/s: slower than this and a skid-steer just sits there
 MAX_GOAL_M = 15.0        # a click further than this is a mis-click
@@ -293,6 +298,8 @@ class TeleopSession:
         footprint: tuple[float, float, float] = (0.25, 0.25, 0.20),
         mapping: bool = True,
         camera: Any = None,
+        tight_gaps: bool = True,
+        clearance_m: float = 0.02,
         camera_url: str | None = None,
         claw_m: float = 0.0,
         map_min_range_m: float = 0.0,
@@ -318,7 +325,8 @@ class TeleopSession:
         self._trail: deque[tuple[float, float]] = deque(maxlen=3000)
         self._window: deque[tuple[float, Pose]] = deque()
         self._history: deque[tuple[float, Pose]] = deque()   # ~2 s of (bridge t, pose)
-        self.mapper = (Mapper(planner_config=PlannerConfig.for_footprint(*footprint))
+        self.mapper = (Mapper(planner_config=PlannerConfig.for_footprint(
+                           *footprint, tight=tight_gaps, margin_m=clearance_m))
                        if mapping and Mapper is not None else None)
         self.map_skipped = 0                   # scans left out: taken mid-turn
         self.camera = camera
@@ -461,10 +469,16 @@ class TeleopSession:
             self._start_trip(legs, wait_s if come_back else 0.0)
 
     def go_home(self) -> None:
-        """Drive back to home and turn to face the way it faced there: forwards
-        or backwards, whichever needs less turning in all."""
+        """Drive back to home, arriving NOSE FIRST and stopping there.
+
+        It used to come home whichever way turned least (often backwards) and
+        then spin to the heading it had when home was set. For a hand-off that
+        is the wrong ending twice over: the arm points away while someone is
+        reaching for it, and the spin happens in the exact spot a person is
+        standing. Driving home forwards costs the slip that reversing would
+        have cancelled, which the gyro heading largely covers anyway."""
         with self._lock:
-            self._start_trip([_Leg(self.home, True, "home", straight="auto")], 0.0)
+            self._start_trip([_Leg(self.home, False, "home")], 0.0)
 
     def set_home(self) -> None:
         """Home is here, facing this way (it starts where teleop connected)."""
@@ -553,7 +567,15 @@ class TeleopSession:
             a.ctl = PathTracker(leg.path, limits, reverse=leg.reverse)
             d = path_length(leg.path)
         elif lidar and self.mapper is not None and self.mapper.has_map():
-            a.ctl = PathFollower(self.mapper, limits, FollowConfig(),
+            a.ctl = PathFollower(self.mapper, limits,
+                                 # The CHASSIS has to clear when it spins, not the
+                                 # claw: the arm is thin, and demanding a circle
+                                 # around its tip stops the robot turning almost
+                                 # anywhere. `rear` is the chassis half-length
+                                 # (only `front` carries the claw), and the
+                                 # bubble still sweeps the real outline.
+                                 FollowConfig(spin_radius_m=math.hypot(
+                                     self.footprint[1], self.footprint[2])),
                                  bubble=lambda: getattr(robot, "bubble", None))
         elif lidar:
             a.ctl = AvoidingGotoController(bridge_scan_source(robot), limits,
@@ -563,7 +585,7 @@ class TeleopSession:
         a.avoiding = lidar and leg.path is None     # a drawn curve is followed as drawn
         a.phase, a.dist = "drive", d
         a.started = time.monotonic()
-        a.timeout_s = max(20.0, 10.0 + 4.0 * d / v) + (10.0 if a.legs[0].face else 0.0)
+        a.timeout_s = max(20.0, 10.0 + 6.0 * d / v) + (10.0 if a.legs[0].face else 0.0)
 
     def cancel(self) -> None:
         with self._lock:
