@@ -79,6 +79,10 @@ def main() -> int:
                     help="lidar returns closer than this to the robot's centre never reach "
                          "the map (default 0.45: the arm reaches 0.42, so anything nearer is "
                          "the robot itself). The Pi's safety bubble still sees them")
+    ap.add_argument("--claw", type=float, default=0.0, metavar="M",
+                    help="how much of --footprint's FRONT is arm rather than chassis. The "
+                         "safety bubble uses the whole outline either way; this only stops "
+                         "the page drawing the arm as if it were bodywork")
     ap.add_argument("--camera", default="auto", metavar="URL",
                     help="MJPEG stream to show on the page. 'auto' (default) points at the "
                          "robot Pi's port 8790, where scripts/cam_stream.py serves it; "
@@ -129,7 +133,7 @@ def main() -> int:
         camera_url = args.camera
 
     session = TeleopSession(connect, config, recorder, footprint=footprint,
-                            camera_url=camera_url,
+                            camera_url=camera_url, claw_m=args.claw,
                             map_min_range_m=args.map_min_range).start()
     try:
         httpd = serve(session, args.listen, args.port)

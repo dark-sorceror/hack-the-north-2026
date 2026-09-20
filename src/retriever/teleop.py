@@ -294,6 +294,7 @@ class TeleopSession:
         mapping: bool = True,
         camera: Any = None,
         camera_url: str | None = None,
+        claw_m: float = 0.0,
         map_min_range_m: float = 0.0,
     ) -> None:
         """mapping: build a map from the lidar's scans (needs numpy), and plan
@@ -323,6 +324,8 @@ class TeleopSession:
         self.camera = camera
         self._camera_t: float | None = None
         self.camera_url = camera_url      # an MJPEG stream for the page (cam_stream.py)
+        # How much of footprint[0] is arm rather than chassis. Drawing only.
+        self.claw_m = float(claw_m)
         # Returns this close to the lidar never reach the MAP. Brackets, the arm
         # and cable runs sit just outside the chassis and come back in nearly
         # every scan; mapped, they become a wall that rides along with the robot
@@ -942,6 +945,7 @@ class TeleopSession:
                          if gyro_turn > math.radians(90) else None),
         }
         snap["camera_url"] = self.camera_url
+        snap["claw_m"] = self.claw_m
         snap["estop"] = bool(robot is not None and robot.estopped)
         snap["watchdog"] = bool(robot is not None and robot.watchdog_tripped)
         bubble = getattr(robot, "bubble", None) if robot is not None else None
