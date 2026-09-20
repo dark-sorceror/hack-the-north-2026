@@ -11,6 +11,16 @@ tick loop, so it works with no laptop connected; releasing the button clears not
 clear_estop is refused while it is still pressed. The core starts tripped: nothing moves
 until a client proves it is alive.
 
+LIDAR SAFETY BUBBLE (optional; `lidar=None` leaves every byte as it was).
+With a lidar, every act's base command passes through SafetyBubble
+(bridge/safety.py) before it reaches the driver: scaled down or zeroed, never
+raised, arm/gripper/vacuum untouched, e-stop still first. The tick loop
+re-checks the last command against each new scan and may only LOWER the wheel
+speeds between acts; raising them again waits for the laptop's next act, so
+the Pi never starts motion on its own. Laptops that send `subscribe` get the
+bubble's state in every `state` and a downsampled `scan` at scan_hz; others
+get exactly the v1 stream (see protocol.py).
+
 All of it is in `BridgeCore`, which has no sockets and no clock (every method takes `now`),
 so the safety logic is tested exactly and instantly. `BridgeServer` is the thin asyncio
 shell around it. Its tick loop catches everything, because if it died the watchdog would
@@ -40,7 +50,9 @@ from retriever.bridge.protocol import (
     Hello,
     Message,
     ProtocolError,
+    Scan,
     State,
+    Subscribe,
     decode,
     encode,
 )
@@ -98,7 +110,15 @@ class BridgeCore:
         motion_timeout_s: float = 0.5,
         max_wheel_mps: float = 0.8,
         estop_input: Callable[[], bool] | None = None,
+        lidar: Any = None,
+        bubble: Any = None,
+        imu: Any = None,
     ) -> None:
+        """lidar: a LidarSource (bridge/lidar.py) on the SAME clock as `now`;
+        bubble: a SafetyBubble, default settings if None. No lidar, no bubble.
+        imu: anything with yaw() -> radians or None (bridge/imu.D435iImu): its
+        heading goes to subscribed clients. If it has `wheels_still`, that is
+        pointed at this core, so the gyro only learns its bias while stopped."""
         for name, value in (
             ("timeout_s", timeout_s),
             ("motion_timeout_s", motion_timeout_s),
@@ -109,7 +129,19 @@ class BridgeCore:
         if not isinstance(driver, HardwareDriver):
             raise TypeError(f"{type(driver).__name__} does not implement HardwareDriver")
         self.driver = driver
+        self.imu = imu
+        if imu is not None and hasattr(imu, "wheels_still"):
+            imu.wheels_still = lambda: self._wheels == (0.0, 0.0)
         self.estop_input = estop_input  # True while a physical e-stop is pressed
+        self.lidar = lidar
+        if lidar is not None and bubble is None:
+            from retriever.bridge.safety import SafetyBubble
+
+            bubble = SafetyBubble()
+        self.bubble = bubble if lidar is not None else None
+        self.cmd = (0.0, 0.0)           # the laptop's last base command, before the bubble
+        self.decision: Any = None       # the bubble's decision behind the current wheels
+        self._bubble_errors = 0
         self.geo = geo
         self.timeout_s = timeout_s
         self.motion_timeout_s = motion_timeout_s
@@ -153,6 +185,8 @@ class BridgeCore:
             logger.info("laptop heard from: watchdog cleared")
         if isinstance(msg, Act):
             return self._apply(msg, now)
+        if isinstance(msg, Subscribe):
+            return None      # a Subscribe is per connection; BridgeServer keeps it
         if isinstance(msg, Estop):
             self.trigger_estop(msg.reason or "estop sent by the laptop", now)
         elif isinstance(msg, ClearEstop):
@@ -222,12 +256,82 @@ class BridgeCore:
                 self.motion_timeout_s * 1000,
             )
             self._halt(now)
+        if self.lidar is not None:
+            self._tick_bubble(now)
         if self._wheels == (0.0, 0.0) and now - self._zero_sent_at >= ZERO_REFRESH_S:
             self._resend_zero_wheels(now)
 
-    def snapshot(self, now: float) -> State:
-        """The State to stream now; raises whatever the driver raises if it cannot be read."""
+    # -- the lidar safety bubble ------------------------------------------
+
+    def _judge(self, vx: float, wz: float, now: float) -> Any:
+        """The bubble's verdict on (vx, wz). A bubble that raises stops the
+        base: a safety check that cannot run fails toward stopped."""
+        from retriever.bridge.safety import BLOCKED, BubbleDecision
+
+        try:
+            return self.bubble.check(self.lidar.latest_scan(), vx, wz, now)
+        except Exception as exc:
+            self._bubble_errors += 1
+            if self._bubble_errors in (1, 10) or self._bubble_errors % 500 == 0:
+                logger.error("safety bubble failed (%d times): %s", self._bubble_errors, exc)
+            return BubbleDecision(0.0, 0.0, BLOCKED, f"safety bubble failed: {exc}"[:200],
+                                  None, 0.0, 0.0)
+
+    def _tick_bubble(self, now: float) -> None:
+        """Between acts: re-check the laptop's last command against the newest
+        scan and LOWER the wheels if it no longer fits. Never raises them."""
+        moving = (
+            self.cmd != (0.0, 0.0)
+            and self._act_in_force
+            and now - self._last_act_at <= self.motion_timeout_s
+            and not self.estop
+            and not self.watchdog_tripped
+        )
+        d = self._judge(*(self.cmd if moving else (0.0, 0.0)), now)
+        if not moving:
+            self.decision = d                       # idle: status only
+            return
+        applied = self.decision.scale if self.decision is not None else 1.0
+        if self._wheels == (0.0, 0.0) or d.scale >= applied - 1e-9:
+            return                                  # a looser verdict waits for the next act
+        left, right = self.wheel_speeds(d.vx, d.wz)
+        try:
+            self.driver.set_wheels(left, right)
+        except Exception as exc:
+            logger.error("lowering wheel speed for the bubble failed (%s), stopping", exc)
+            self._halt(now)
+            return
+        self._wheels = (left, right)
+        self.decision = d
+
+    def scan_message(self, scan: Any, now: float, step_deg: float = 2.0) -> Scan:
+        stop_m = self.decision.stop_m if self.decision is not None else 0.0
+        ranges, near = self.bubble.wire_scan(scan, stop_m, step_deg)
+        return Scan(t=scan.t, step_deg=step_deg, ranges_cm=ranges, near=near)
+
+    def snapshot(self, now: float, extended: bool = False) -> State:
+        """The State to stream now; raises whatever the driver raises if it cannot be read.
+
+        extended: add the bubble fields (only for a client that subscribed).
+        """
         reading = self.driver.read_state()
+        ext: dict[str, Any] = {}
+        if extended and self.lidar is not None:
+            d = self.decision if self.decision is not None else self._judge(0.0, 0.0, now)
+            ext = {
+                "bubble": d.state,
+                "bubble_reason": d.reason,
+                "nearest_m": None if d.nearest_m is None else round(d.nearest_m, 3),
+                "stop_m": round(d.stop_m, 3),
+            }
+        if extended and self.imu is not None:
+            try:
+                yaw = self.imu.yaw()
+            except Exception as exc:  # a gyro fault must not stop the state stream
+                logger.warning("gyro read failed: %s", exc)
+                yaw = None
+            if yaw is not None and math.isfinite(yaw):
+                ext["yaw"] = round(float(yaw), 6)
         return State(
             seq=self.last_seq,
             t=now,
@@ -238,6 +342,7 @@ class BridgeCore:
             battery=reading["battery"],
             estop=self.estop,
             watchdog_tripped=self.watchdog_tripped,
+            **ext,
         )
 
     def hello(self, state_hz: float) -> Hello:
@@ -257,7 +362,12 @@ class BridgeCore:
         self.poll_estop_input(now)  # a press since the last tick beats this act
         if self.estop:
             return f"estop is latched ({self.estop_reason}); send clear_estop before driving"
-        left, right = self.wheel_speeds(act.base_vx, act.base_wz)
+        vx, wz = act.base_vx, act.base_wz
+        if self.lidar is not None:
+            self.cmd = (vx, wz)
+            self.decision = self._judge(vx, wz, now)
+            vx, wz = self.decision.vx, self.decision.wz
+        left, right = self.wheel_speeds(vx, wz)
         try:
             self.driver.set_wheels(left, right)
             self._wheels = (left, right)
@@ -329,15 +439,23 @@ class BridgeServer:
         max_wheel_mps: float = 0.8,
         clock: Callable[[], float] = time.monotonic,
         estop_input: Callable[[], bool] | None = None,
+        lidar: Any = None,
+        bubble: Any = None,
+        scan_hz: float = 5.0,
+        imu: Any = None,
     ) -> None:
         """estop_input: polled every tick (so at state_hz) and before every act;
         return True while a physical e-stop is pressed. Called on the loop
-        thread, so it must be a quick pin read — see bridge/gpio.EstopButton."""
+        thread, so it must be a quick pin read — see bridge/gpio.EstopButton.
+
+        lidar / bubble: the optional safety bubble (see the module doc). The
+        lidar must run on `clock`; the server closes it on close()."""
         if not (math.isfinite(state_hz) and state_hz > 0.0):
             raise ValueError(f"state_hz must be positive and finite, got {state_hz!r}")
         self._host = host
         self._port = port
         self._state_hz = state_hz
+        self.scan_period = 1.0 / scan_hz if scan_hz > 0 else float("inf")
         self._clock = clock
         self.core = BridgeCore(
             driver,
@@ -347,7 +465,13 @@ class BridgeServer:
             motion_timeout_s=motion_timeout_ms / 1000.0,
             max_wheel_mps=max_wheel_mps,
             estop_input=estop_input,
+            lidar=lidar,
+            bubble=bubble,
+            imu=imu,
         )
+        self._sub: Subscribe | None = None      # what the current client asked for
+        self._scan_sent: Any = None
+        self._scan_sent_at = float("-inf")
         self._server: asyncio.Server | None = None
         self._ticks: asyncio.Task[None] | None = None
         self._client: _Client | None = None
@@ -398,6 +522,16 @@ class BridgeServer:
         if self._client is not None:
             self._drop(self._client, "the bridge is shutting down")
         self.core.disconnected(self._clock())
+        if self.core.lidar is not None:
+            try:
+                self.core.lidar.close()         # the lidar motor stops with the bridge
+            except Exception as exc:
+                logger.error("lidar close failed: %s", exc)
+        if self.core.imu is not None and hasattr(self.core.imu, "close"):
+            try:
+                self.core.imu.close()           # powers the gyro down
+            except Exception as exc:
+                logger.error("gyro close failed: %s", exc)
         logger.info("bridge closed; motors stopped")
 
     def trigger_estop(self, reason: str = "local estop") -> None:
@@ -427,6 +561,7 @@ class BridgeServer:
             self._drop(current, f"its link is stale and {peer} is connecting")
         client = _Client(peer, reader, writer)
         self._client = client
+        self._sub, self._scan_sent = None, None
         self.core.connected(now)
         self._send(client, self.core.hello(self._state_hz))  # before any State: no await
         logger.info("%s connected; nothing moves until it sends a valid message", peer)
@@ -467,6 +602,8 @@ class BridgeServer:
             self.core.reject(str(exc), now)
             self._send(client, _error(str(exc)))
             return
+        if isinstance(msg, Subscribe) and self._client is client:
+            self._sub = msg
         refusal = self.core.handle(msg, now)
         if refusal is not None:
             self._send(client, _error(refusal))
@@ -510,8 +647,11 @@ class BridgeServer:
         try:
             now = self._clock()
             self.core.tick(now)
-            if self._client is not None:
-                self._send(self._client, self.core.snapshot(now))
+            client, sub = self._client, self._sub
+            if client is not None:
+                self._send(client, self.core.snapshot(now, extended=bool(sub and sub.safety)))
+                if sub and sub.scan and self.core.lidar is not None:
+                    self._stream_scan(client, now)
         except Exception:
             if not self._tick_failing:
                 logger.exception("bridge tick failed; retrying every tick")
@@ -520,6 +660,20 @@ class BridgeServer:
             if self._tick_failing:
                 logger.info("bridge tick recovered")
             self._tick_failing = False
+
+    def _stream_scan(self, client: _Client, now: float) -> None:
+        if now - self._scan_sent_at < self.scan_period:
+            return
+        try:
+            scan = self.core.lidar.latest_scan()
+            if scan is None or scan is self._scan_sent:
+                return
+            msg = self.core.scan_message(scan, now)
+        except Exception as exc:
+            logger.error("scan for the laptop failed: %s", exc)
+            return
+        self._scan_sent, self._scan_sent_at = scan, now
+        self._send(client, msg)
 
 
 class ServerThread:
