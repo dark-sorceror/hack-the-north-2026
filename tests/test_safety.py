@@ -123,6 +123,79 @@ def raw_scan(world, t=0.0):
 # ---------------------------------------------------------------- the rules
 
 
+class TestRangedMask(unittest.TestCase):
+    """A sector mask blinds the robot at EVERY range that way. Right for a
+    wheel, which fills the view; wrong for a bracket standing off the chassis,
+    where blanking the sector hides the room behind it too -- and the robot
+    then drives into what it cannot see."""
+
+    def test_a_ranged_sector_hides_the_bracket_and_keeps_the_room(self):
+        m = parse_mask("266:290:0.5")
+        a = DEG(275)
+        self.assertTrue(in_mask(a, m, 0.35))     # the bracket
+        self.assertTrue(in_mask(a, m, 0.49))
+        self.assertFalse(in_mask(a, m, 0.60))    # a chair beyond it
+        self.assertFalse(in_mask(a, m, 2.00))
+
+    def test_a_plain_sector_still_hides_everything(self):
+        m = parse_mask("14:19")
+        self.assertTrue(in_mask(DEG(16), m, 0.3))
+        self.assertTrue(in_mask(DEG(16), m, 5.0))
+        self.assertTrue(in_mask(DEG(16), m))     # no range given: as before
+
+    def test_outside_the_sector_is_never_masked(self):
+        m = parse_mask("266:290:0.5")
+        self.assertFalse(in_mask(DEG(100), m, 0.2))
+
+    def test_a_bad_interval_says_so(self):
+        for bad in ("266:290:0", "1:2:3:4", "nonsense"):
+            with self.assertRaises(ValueError):
+                parse_mask(bad)
+
+
+class TestNoseFootprint(unittest.TestCase):
+    """An arm reaching past the chassis is narrow. Squaring it off into a
+    full-width front was refusing curves for corners the robot doesn't have."""
+
+    def reach(self, fp, deg):
+        import math
+        a = math.radians(deg)
+        lo, hi = 0.0, 1.5
+        for _ in range(40):
+            mid = (lo + hi) / 2
+            if fp.clearance(mid * math.cos(a), mid * math.sin(a)) > 0:
+                hi = mid
+            else:
+                lo = mid
+        return lo
+
+    def test_the_nose_reaches_ahead_without_fattening_the_corners(self):
+        slab = Footprint(0.42, 0.22, 0.185)
+        nose = Footprint(0.22, 0.22, 0.185, nose_m=0.20, nose_half_width_m=0.06)
+        self.assertAlmostEqual(self.reach(nose, 0), 0.42, places=2)       # arm still covered
+        self.assertAlmostEqual(self.reach(nose, 90), 0.185, places=2)     # sides untouched
+        self.assertLess(self.reach(nose, 20), self.reach(slab, 20) - 0.15)  # diagonals freed
+        self.assertAlmostEqual(self.reach(nose, 60), self.reach(slab, 60), places=2)
+
+    def test_a_point_beside_the_nose_is_outside_the_robot(self):
+        nose = Footprint(0.22, 0.22, 0.185, nose_m=0.20, nose_half_width_m=0.06)
+        self.assertEqual(nose.clearance(0.30, 0.0), 0.0)        # in front: that is the arm
+        self.assertGreater(nose.clearance(0.30, 0.15), 0.05)    # beside it: clear air
+
+    def test_the_swept_outline_walks_the_nose(self):
+        from retriever.bridge.safety import SafetyBubble, BubbleConfig
+        fp = Footprint(0.22, 0.22, 0.185, nose_m=0.20, nose_half_width_m=0.06)
+        b = SafetyBubble(BubbleConfig(footprint=fp))
+        pts = b._outline()
+        self.assertTrue(any(x > 0.40 for x, _ in pts), "the nose tip is not swept")
+        wide = [(x, y) for x, y in pts if x > 0.30 and abs(y) > 0.12]
+        self.assertFalse(wide, f"swept corners the robot does not have: {wide[:3]}")
+
+    def test_a_nose_wider_than_the_body_is_refused(self):
+        with self.assertRaises(ValueError):
+            Footprint(0.22, 0.22, 0.185, nose_m=0.2, nose_half_width_m=0.30)
+
+
 class TestFootprintAndMasks(unittest.TestCase):
     def test_clearance(self):
         fp = Footprint(0.25, 0.20, 0.15)
