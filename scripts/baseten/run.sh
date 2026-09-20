@@ -15,9 +15,17 @@ python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
 echo "=== deps ==="
-# ffmpeg: the dataset stores episodes as AV1 mp4, and decode is what feeds the
-# GPU. Without it the loader fails at the first video frame, not at startup.
-apt-get update -qq && apt-get install -y -qq ffmpeg >/dev/null 2>&1 || true
+# git    : the pytorch runtime image has no git, and lerobot 0.5.x installs
+#          from a git URL, so pip cannot fetch it without this.
+# ffmpeg : episodes are AV1 mp4 and decode is what feeds the GPU. Missing it
+#          fails at the first video frame, not at startup.
+# Deliberately not silenced with "|| true": both are hard requirements, and
+# swallowing a failed apt here just moves the error somewhere less obvious.
+apt-get update -qq
+apt-get install -y -qq git ffmpeg
+command -v git >/dev/null || { echo "git missing after apt install"; exit 1; }
+command -v ffmpeg >/dev/null || { echo "ffmpeg missing after apt install"; exit 1; }
+echo "  git $(git --version | awk '{print $3}') | ffmpeg $(ffmpeg -version 2>/dev/null | head -1 | awk '{print $3}')"
 # PyPI only publishes lerobot up to 0.4.4; the 0.5.x line exists solely as
 # git tags, which is why D-Robotics' guide clones rather than pip installs.
 # v0.5.1 is the newest tag and matches the board's fork exactly (their guide
