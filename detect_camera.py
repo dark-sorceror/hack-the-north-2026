@@ -110,7 +110,7 @@ def detect_camera_on_pi(host: str) -> dict:
         info["pyrealsense2_info"] = stdout.strip()
     else:
         print_status("✗", "pyrealsense2 not installed")
-        print_status("→", "Install with: python quickstart.py --install")
+        print_status("→", "Install with: bash setup_realsense_pi.sh")
         info["errors"].append("pyrealsense2 not installed")
     
     # Test if camera is visible to pyrealsense2
@@ -368,7 +368,7 @@ def main():
         print(f"   ssh gisooj@{args.host}")
     elif not info["pyrealsense2_installed"]:
         print_status("1", "Install pyrealsense2:")
-        print("   python quickstart.py --install")
+        print("   bash setup_realsense_pi.sh")
     elif not info["camera_visible_to_pyrealsense2"]:
         print_status("1", "Camera not visible - check:")
         print("   • USB cable connection")

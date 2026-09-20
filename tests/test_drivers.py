@@ -283,7 +283,7 @@ class WheelsNeedTheirBusTest(unittest.TestCase):
             with self.assertRaises((ConnectionError, ImportError)) as ctx:
                 build()
             # no pyserial: how to install it; with pyserial: which port failed
-            self.assertTrue("pi/setup.sh" in str(ctx.exception) or port in str(ctx.exception),
+            self.assertTrue("nav-pi/setup.sh" in str(ctx.exception) or port in str(ctx.exception),
                             str(ctx.exception))
 
 

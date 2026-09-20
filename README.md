@@ -1,358 +1,395 @@
-# Voice-controlled multi-Pi robot
+<div align="center">
 
-A runnable **simulation-first starter** for continuous voice commands, WebSocket communication, and a fetch-and-return task sequence. Python 3.11+; Raspberry Pi OS 64-bit is the intended Pi environment. No ROS dependency.
+# Retriever
 
-## Layout
+**Tell it what you dropped. It maps the room, routes around the furniture, drives there, picks it up, and brings it back.**
 
-- **Central Pi 5:** `robot_app.voice` captures microphone audio, plays model speech, and runs the task coordinator.
-- **Cloud:** `robot_app.cloud` relays the Yibu Qwen realtime protocol and records token usage. Only this process needs the provider key.
-- **Hardware Pi 5:** `robot_app.hardware` exposes the robot command protocol. Currently its driver simulates navigation and the SO-101 arm.
-- **Depth-camera Pi:** `robot_app.camera` captures RGB/depth frames, detects the requested object, and returns a calibrated `map` pose. Set `CAMERA_URL` to this service. In the local demo the hardware simulator also supplies simulated camera observations.
+A voice-controlled retrieval robot built at **Hack the North 2026**.
+Four computers, one of which runs the cloud coordinator and a hard-real-time safety
+interlock on the same chip — on purpose, because it runs QNX.
 
-The `vla_core/` and `hardware_bridge/` paths are pure-Python compatibility facades for the maintained `robot_app` implementation. ROS 2 is not required for Phase 1.
+<!-- TODO: add demo.gif here -->
 
-## Run the local simulation first
+</div>
 
-From the project directory on each Pi:
+---
+
+## What it is
+
+You say *"bring me my bottle."* Retriever hears you through the speaker it answers with,
+works out which of three bottles on the floor is **yours**, plans a route around the chairs,
+drives there, grasps it with a learned policy, and brings it back.
+
+The interesting part was never picking things up. It was **deciding**:
+
+- **Which one is yours.** A text-prompted detector finds *a* bottle. DINOv2 embeddings plus
+  a hue histogram decide it's *your* bottle, by the margin over the runner-up.
+- **Whether it's sure enough to act.** When the top two matches are too close to call, it
+  asks instead of guessing. Across both evaluation runs, *accepted & wrong* was **0**.
+- **Whether it should be moving at all.** Eight independent layers can stop this robot. The
+  last one reaches it on a single optocoupled wire with no network path at all.
+
+---
+
+## Architecture
+
+```
+                  ☁  CLOUD — LLM planner
+                     picks WHICH skill runs next · object memory
+                     in no control loop, ever
+                              │ HTTPS, initiated from below
+ ┌────────────────────────────┴───────────────────────────────────┐
+ │  CENTRAL Pi 5 — QNX 8.0 — eyes, ears, voice, and the interlock │
+ │                                                                 │
+ │   ┌── normal priority ────────────────────────────────────┐    │
+ │   │  microphone in · speaker out                          │    │
+ │   │  Qwen-Omni: image + audio + language, in ONE call     │    │
+ │   │  D435i → object detection: WHICH thing did they mean? │    │
+ │   │  depth on that box → where it is → a goal pose        │    │
+ │   │  network-facing, allocates, allowed to crash          │    │
+ │   └───────────────────────────────────────────────────────┘    │
+ │   ┌── SCHED_FIFO 50 ──────────────────────────────────────┐    │
+ │   │  the same camera → TFLite person detection, on-device │    │
+ │   │  lineguard → 20 Hz heartbeat on GPIO17                │    │
+ │   │  hard real-time, trusted, must never be starved       │    │
+ │   └───────────────────────────────────────────────────────┘    │
+ │                                                                 │
+ │   One camera, two consumers at opposite ends of the priority   │
+ │   scale. A microkernel is what makes that safe on one chip.    │
+ └──────┬──────────────────┬──────────────────────┬───────────────┘
+  goal  │            grasp │                      │ ONE optocoupled wire
+  pose  │                  │                      │ no network path at all
+ ┌──────┴────────────┐  ┌──┴───────────────┐      │
+ │ NAV Pi — the spine│  │ S100 — the hand  │      │
+ │                   │  │ SO-101 arm       │      │
+ │ 4× DDSM115  RS485 │  │ ACT inference,   │      │
+ │ RPLIDAR A2M12     │  │ local            │      │
+ │ MPU-6050 gyro I²C │  │ trained on       │      │
+ │                   │  │ Baseten          │      │
+ │ watchdog 300 ms   │  └──────────────────┘      │
+ │ deadman 500 ms    │◄────────────────────────────┘
+ │ e-stop · bubble   │      ┌──────────────────────┐
+ │ stdlib-only Python│◄:7777►│ MAC                 │
+ └───────────────────┘      │ occupancy map        │
+                            │ costmap · A*         │
+                            │ pure pursuit         │
+                            │ dashboard · teleop   │
+                            └──────────────────────┘
+```
+
+### Why the coordinator and the interlock share a chip
+
+On a best-effort Linux box, putting a network-facing cloud coordinator next to a
+safety-critical control loop would be reckless — the coordinator allocates, blocks on I/O,
+and is exactly the workload that makes something else miss a deadline.
+
+QNX is a hard-real-time microkernel with strict priority scheduling, so the interlock at
+`SCHED_FIFO 50` **cannot** be starved by anything the coordinator does. It's the same
+property that has QNX running infotainment beside safety-critical systems in 275 million
+vehicles.
+
+We measured it with both running: **20–30 µs of scheduling lateness on a 25 ms tick.**
+
+### Three rules we never bent
+
+| Rule | Why |
+|---|---|
+| **The model decides WHAT, never HOW** | An LLM picks which skill runs next; control laws and a learned policy pick the actual motion. No model output becomes a velocity. |
+| **Every layer below the brain can only *stop* the robot** | None of them invents motion, so a bug upstairs can never be papered over by a bug downstairs. |
+| **The cloud is in no control loop** | The spine never talks to it. Lose the network and the robot gets *quieter*, not less safe. |
+
+---
+
+## Run it, with no robot
+
+Core interfaces are stdlib-only on purpose — no torch, no hardware, no venv:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[test]'
-export ROBOT_TOKEN='replace-with-the-same-random-secret-at-least-24-characters'
+python3 -m unittest discover -s tests -t .      # 903 tests
 ```
 
-Generate a token with `python -c 'import secrets; print(secrets.token_urlsafe(32))'`. Variables in `.env.example` are documentation; `.env` is not loaded automatically.
-
-Terminal 1:
+Drive a simulated robot through a simulated room, in a browser:
 
 ```bash
-python -m robot_app.hardware
+python3 scripts/teleop.py --sim                 # then open http://127.0.0.1:8791
 ```
 
-Terminal 2, with the same token:
+Hold **W/A/S/D** to drive. **Click the map** and it plans a route and follows it.
+**Shift-click** for a round trip. **H** goes home. The simulated lidar drops ~60% of its
+rays, adds noise, and lets black objects return nothing — because an idealised sensor hides
+the bugs that matter.
+
+<details>
+<summary><b>On the real robot</b></summary>
 
 ```bash
-python -m robot_app.coordinator --target bottle
+# on the Pi (one command turns a fresh Pi into a robot that boots into the bridge)
+bash nav-pi/setup.sh --driver real --imu mpu --lidar-port /dev/ttyAMA0
+
+# on the laptop
+python3 scripts/teleop.py --bridge hao.local:7777
 ```
 
-Expected: `state: completed`, `simulated: true`. No provider key, microphone, ROS, motors, or API credit needed. The sequence saves the start, locates, approaches, reobserves, grasps, verifies, stows, and returns. It holds the object at the start; release/handover is not implemented.
+`scripts/pi_doctor.sh` says in plain language why the Pi can't be reached.
+`scripts/link_test.py` measures whether the 300 ms watchdog survives your network.
+</details>
 
-## Enable continuous voice
+---
 
-On the cloud host (or a separate local terminal for initial testing):
+## From a sentence to wheel speeds
 
-```bash
-export ROBOT_TOKEN='your-shared-secret'
-export YIBU_API_KEY='your-private-Yibu-key'
-export YIBU_AUDIT_LOG='artifacts/yibu_api_calls.jsonl'
-python -m robot_app.cloud --host 0.0.0.0
+The LLM's job ends at choosing a skill and a destination. Everything after that is
+classical autonomy — which is the point: each half is doing what it's actually good at, and
+the seam between them is a coordinate.
+
+```
+"bring me my bottle"
+   └─► LLM picks the skill ──► goto(x, y)
+                                  │
+       lidar scan ──► log-odds grid ──► distance field ──► costmap ──► A* ──► string pull
+          at the        hit +0.9          3 ms, exact       lethal     1 ms     keeps
+          pose it       miss −0.3         to 4.5e-7         0.35 m     420      clearance
+          was taken                       cells             + fade     cells
+                             ▲                                            │
+          depth-camera points join here ─┘                                ▼
+          block-only, expires ~2 s                           pure pursuit, 20 Hz ──► wheels
 ```
 
-On the central Pi:
+A model that hallucinates a destination gets a route planned to it, checked against a map,
+and refused by a safety bubble if it can't be reached — rather than a hallucinated
+trajectory going straight to a motor.
 
-```bash
-sudo apt-get install libportaudio2
-python -m pip install -e '.[audio]'
-export ROBOT_TOKEN='your-shared-secret'
-export VOICE_URL='ws://127.0.0.1:8765'
-export ROBOT_URL='ws://127.0.0.1:8766'
-export CAMERA_URL="$ROBOT_URL"
-export VOICE_OUTPUT_RATE=48000
-python -m robot_app.voice --list-devices
-python -m robot_app.voice --input-device 0 --output-device 0
+<details>
+<summary><b>The four decisions that carry the navigation</b></summary>
+
+**Hits weigh three times misses.** A chair leg is 2 cm thick in a 5 cm cell, and most beams
+crossing that cell miss the leg. With equal weights the leg gets erased and the robot drives
+into it. A cell that took a return is never cleared by the same scan.
+
+**Unknown is never free.** Only beams that came *back* clear anything. A black or chrome
+object looks exactly like empty space to a lidar, so unseen directions get creep speed — in
+the map, the planner and the safety bubble alike.
+
+**Inflate by the circumscribed radius.** Corner-to-centre, because a tank sweeps its corners
+when it spins. On this chassis (43.5 × 38 cm) that's 0.29 m, giving a 0.35 m lethal zone.
+Two things fall out free: a chair's four legs merge into one obstacle, and gaps under
+0.70 m close — the honest answer for a 38 cm robot with odometry drift.
+
+**Speed is what the corner allows.** The first rule divided top speed by curvature and had
+the robot crawling at 0.1 m/s round a half-metre radius. Now speed is the least of what the
+base can turn, what the bend allows sideways, and the distance left. A tight S-curve went
+from **40 s to 14 s**, at 19 cm off the line.
+
+The Euclidean distance transform that inflation needs is a separable two-pass implementation
+in NumPy — SciPy and OpenCV both have one, and neither is on the Pi-side stack.
+</details>
+
+### Heading comes from a gyro, because the tyres lie
+
+A four-wheel skid-steer turns by dragging all four tyres sideways. Ours claims **1.77×** the
+rotation it actually produces, so it realised only **56%** of every turn rate commanded.
+Wheel odometry gets distance right and heading catastrophically wrong.
+
+An MPU-6050 on I²C measures rotation directly at 200 Hz. Yaw rate is taken about the
+**gravity vector** the accelerometer reports, so the board can be mounted at any angle — it
+measured the real mount at 2° off level and compensated. **Zero-velocity updates** hold the
+heading and re-learn the bias whenever the wheels stop, because a stopped skid-steer is not
+turning.
+
+> Drift at standstill: **7.5 °/s → 0.000° over 10 seconds.**
+
+### The grasp is the one part that's learned
+
+Everything above the wrist is deterministic. The last 15 cm — approach, align, close without
+knocking the thing over — is an **ACT (Action Chunking Transformer)** policy: demonstrations
+teleoperated on the SO-101, trained on Baseten, checkpoint pulled down, **inference running
+locally on the S100**. A grasp cannot wait for a network round trip, and ACT emits a chunk of
+future actions per forward pass precisely so it doesn't have to.
+
+---
+
+## The safety chain
+
+Eight layers. Each works when everything above it is dead, and every one is a **stop**,
+never a steer.
+
+| Layer | Trips when | Budget |
+|---|---|---|
+| The page | keys released, tab hidden, page closed | immediate |
+| Teleop server | nothing from the page | 300 ms |
+| Bridge client | the laptop process dies | immediate |
+| Pi watchdog | no message at all | 300 ms |
+| Pi motion deadman | heartbeats but no commands | 500 ms |
+| Lidar safety bubble | a command it could not stop from | per command |
+| E-stop latch | page, GPIO button, or missing heartbeat | latched |
+| **QNX interlock** | a person too close — **or it dies** | ~250 ms |
+
+The bubble is the only layer that reasons about geometry: it slides the robot's inflated
+footprint along the commanded arc and refuses anything it couldn't stop from in time, at the
+speed it's going. It can only ever *lower* a command.
+
+### A heartbeat, not a level
+
+The obvious wiring is "hold the line LOW while it's safe." We built it, then found three
+ways it lies:
+
+1. **A GPIO output keeps its last value after the process that set it dies** — a crashed
+   supervisor keeps saying "OK" forever.
+2. **An unpowered Pi can clamp the line near 0 V** through its protection diodes, which the
+   robot reads as "OK".
+3. **After a reboot the pin is an input with a pull-down**, fighting the robot's pull-up.
+
+So `lineguard` **toggles** GPIO17 at 20 Hz while — and only while — SAFE verdicts keep
+arriving, and the robot treats **any steady level** as STOP. Crash, hang, power loss, cut
+wire and reboot all produce the same thing: a steady line.
+
+```
+kill -9 detector    →  STOP after 225 ms
+kill -9 lineguard   →  pin freezes → no edges → robot stops
+pull the power      →  optocoupler LED dark → line high → robot stops
 ```
 
-## Enable the depth camera
+---
 
-Install the detector dependencies on the depth-camera Pi:
+## Measured
 
-```bash
-python -m pip install -e '.[camera]'
+Every number came off the machine or a recording of it. Nothing here is a datasheet figure.
+
+<table>
+<tr><td valign="top" width="50%">
+
+**Driving**
+| | |
+|---|---|
+| Arrival from a clicked spot | **8 cm** |
+| Heading drift, 10 s at standstill | **0.000°** |
+| Turn slip (wheels vs gyro) | **1.77×** |
+| Home error, reversing vs turning round | **5 cm** vs 86 cm |
+| Tight S-curve, after the corner rule | **40 s → 14 s** |
+| Chassis / turning circle | 43.5 × 38 cm / 0.29 m |
+
+**Map and planner**
+| | |
+|---|---|
+| Distance transform, 16 m map | **3 ms** |
+| …error vs brute force | 4.5e-7 cells |
+| A\* | **1 ms**, 420 cells |
+| Clearance past a chair leg | 0.69 m |
+
+</td><td valign="top" width="50%">
+
+**QNX central Pi**
+| | |
+|---|---|
+| SSD-MobileNet v1 quant, 4 threads | **38.5 ms** mean, 39.1 p99 |
+| Live frame capture → STOP on the pin | **81–94 ms** |
+| Detector rate | 17 fps |
+| Interlock lateness, coordinator running | **20–30 µs** on a 25 ms tick |
+| `kill -9` the detector | STOP after 225 ms |
+
+**Link and process**
+| | |
+|---|---|
+| Bridge state rate | 50–77 Hz |
+| State gaps | p50 20 ms, p99 81 ms |
+| Phone hotspot RTT | p50 22 ms, max 141 ms |
+| Tests | **903** |
+
+</td></tr>
+</table>
+
+---
+
+## Repository layout
+
+```
+src/retriever/
+  bridge/        the laptop↔Pi wire, and everything that stops the robot
+    protocol.py    strict JSON lines: unknown fields and vy are errors
+    server.py      watchdog · deadman · e-stop latch   (no sockets, no clock — testable exactly)
+    safety.py      the lidar bubble: only ever lowers a command
+    ddsm115.py     RS485 hub motors · mpu.py  I²C gyro · power.py  PMIC undervoltage
+  navigation/
+    grid.py        log-odds occupancy grid, distance field
+    pathplan.py    costmap, A*, string pulling
+    navigator.py   map keeper + route follower + camera layer
+    pursuit.py     Catmull-Rom curves, pure pursuit, reverse retrace
+    odometry.py    encoder unwrap + exact twist integration, fused with the gyro
+    avoid.py       reactive VFH-lite, kept underneath the map
+  perception/
+    projection.py      the ONLY file allowed to write the camera's sines and cosines
+    depth_obstacles.py depth grid → block-only obstacle points in the base frame
+    identity.py        DINOv2 + hue margin gate — "is this *yours*?"
+  planner/  skills/  voice/            the language side
+scripts/         teleop · depth_publisher · wheel_check · link_test · pi_doctor
+nav-pi/          setup.sh — one command from a fresh Pi to a robot that boots into the bridge
+tests/           903 tests, incl. a subset that runs on the Pi's own Python
 ```
 
-The `pyrealsense2` Python package does not currently publish a compatible wheel for every Raspberry Pi ARM64/Python combination. If installation of `.[camera]` succeeds but the camera service reports that `pyrealsense2` is unavailable, install the Intel RealSense SDK and Python bindings using the SDK's Raspberry Pi ARM64 instructions, or run `robot_app.camera` on a supported host that has the RealSense camera attached. The separate optional extra `.[camera-realsense]` is available only where a compatible pip wheel exists.
+**The one rule:** nothing above `backends/` knows which backend it's talking to. The fake
+robot, the fake Pi and the real one satisfy one interface — which is why four people could
+work in parallel against one physical robot, and why the first real drive took minutes.
 
-Start the camera service with the same `ROBOT_TOKEN` as the central Pi:
+**The second rule, learned the hard way:** every seam between machines is a documented wire
+format, not an import. The depth camera moved between machines five times in two days — nav
+Pi, perception Pi, Mac, back again, and finally the QNX central Pi — and not one
+consumer changed — which is why merging two Pis into one was a half-hour job instead of a
+rewrite.
 
-```bash
-python -m robot_app.camera --host 0.0.0.0 --port 8767 --frame map \
-  --translation 0 0 0
+---
+
+## Built as a progression
+
+This repo is 20 stacked pull requests, in the order the robot actually came up:
+
+```
+#1  python skeleton            #11 drive controllers
+#2  core interfaces            #12 obstacle avoidance
+#3  tank kinematics            #13 teleop
+#4  pi bridge                  #14 room map + A*
+#5  pi setup + boot service    #15 pure pursuit
+#6  link test / doctor         #16 gyro heading
+#7  e-stop + relay             #17 curve speed
+#8  DDSM115 wheels             #18 I²C IMU
+#9  untethered on boot         #19 camera projection
+#10 lidar safety bubble        #20 camera obstacles
 ```
 
-The service uses an Intel RealSense RGB/depth stream and YOLO-World. The detector's pixel-box center is deprojected using the depth measurement, then the configured translation is applied. The camera must be calibrated so the returned frame is the robot navigation frame; the coordinator rejects stale, uncertain, or mismatched observations. Set `CAMERA_URL=ws://CAMERA_PI_IP:8767` on the central Pi.
+Each PR is one working rung. Every one has a test plan, and the suite is green at each
+merge.
 
-### Bridge the board birdseye feed
+---
 
-The board camera dashboard at `http://10.0.0.112:8766/` publishes JPEG frames at `ws://10.0.0.112:8765/birdseye`. To expose that feed to the VLA camera protocol, install the camera extra and run the bridge with a measured pixel-to-map calibration:
+## Sponsor tracks
 
-```bash
-python -m pip install -e '.[camera]'
-export ROBOT_TOKEN='same-secret-used-by-the-central-pi'
-python -m robot_app.camera_bridge --host 0.0.0.0 --port 8767 \
-  --map-center 0 0 --meters-per-pixel 0.005 -0.005 --object-height 0
-```
+| Track | Which computer it owns |
+|---|---|
+| **QNX** | The central Pi. QNX 8.0 running the cloud/voice coordinator and a hard-real-time safety interlock on one chip, with TFLite from `oss.qnx.com` on-device. Measured: 20–30 µs of scheduling lateness with both running. |
+| **Huawei OMNI Live** | The voice path on that same board. Vision, speech and language in one `qwen3.5-omni-flash` call — the frame, the raw audio clip and the spoken answer are a single round trip, because *"bring me that one"* is unanswerable without the picture. |
+| **OpenAI API** | The decision-maker in the cloud. A tool-calling loop where the tool list *is* the entire action space — the model cannot emit a velocity, only a skill and a destination, which the lidar → map → A\* pipeline turns into motion. |
+| **Baseten** | Trains the ACT policy for the last 15 cm. Train in the cloud, own the weights, run inference on the S100 next to the arm. |
 
-Set `CAMERA_URL=ws://CAMERA_BRIDGE_IP:8767` on the central Pi. The bridge provides planar map coordinates from the image; it does not provide depth. Measure `--map-center`, `--meters-per-pixel`, and `--object-height` for the actual camera and robot frame before allowing motion.
+---
 
-Verify the camera Pi from the central Pi before starting voice:
+## Disclosure
 
-```bash
-export CAMERA_URL=ws://CAMERA_PI_IP:8767
-python -m robot_app.camera_check --target bottle --frame map
-```
+Hack the North's build window is **12:00 AM EDT Sat 19 Sept → 8:00 AM EDT Sun 20 Sept**.
 
-Success means the authenticated WebSocket worked, a fresh RGB/depth frame was captured, YOLO-World found the requested object, depth produced a 3D point, and the pose passed freshness, confidence, and frame checks. A failure means the printed error must be fixed before testing robot motion.
+Parts of the instance-identity stack, the navigation geometry and the dashboard exist in a
+prior personal repo and were ported in. **Everything on the robot this weekend** — the QNX
+central Pi, the DDSM115 driver, teleop, the map and route planner, the gyro and
+zero-velocity updates, the depth obstacle layer, the grasp policy — was built on site.
 
-The full deployment has three independent links:
+## Team
 
-| Link | Process | Purpose |
-| --- | --- | --- |
-| Microphone to voice relay | `robot_app.voice` -> `VOICE_URL` | Streams microphone audio and receives speech/tool events |
-| Central Pi to robot Pi | coordinator -> `ROBOT_URL` | Saves pose, approaches, grasps, verifies, stows, and returns |
-| Central Pi to camera Pi | coordinator -> `CAMERA_URL` | Captures frames and returns calibrated object observations |
+Hao Yan · Jay · Axzyl · Gisoo
 
-The microphone is connected to the central Pi running `robot_app.voice`; the camera is connected to the camera Pi running `robot_app.camera`. They do not need to be physically attached to the same Raspberry Pi. To check the microphone before voice, run `python -m robot_app.voice --list-devices`, then start voice with the selected input and output device IDs. The voice process must print `Listening continuously`.
+<!-- TODO: roles, and links -->
 
-From the central Pi, verify all three network links before starting the microphone workflow:
+<div align="center">
 
-```bash
-export ROBOT_TOKEN='same-secret-used-everywhere'
-export VOICE_URL=ws://CLOUD_RELAY_IP:8765
-export ROBOT_URL=ws://ROBOT_PI_IP:8766
-export CAMERA_URL=ws://CAMERA_PI_IP:8767
-python -m robot_app.central_check --target bottle --frame map
-```
+**Devpost** · **Demo video**
 
-This performs no robot movement and does not open the microphone. It verifies voice session negotiation, the robot's starting-pose response, and one live camera detection. Only after it succeeds should you run `python -m robot_app.voice` on the central Pi.
+<!-- TODO: add the Devpost and demo video links -->
 
-Replace device indices using the device list, or omit both to use defaults. Audio is mono signed 16-bit PCM: microphone 16 kHz, speaker 24 kHz by default. Set `VOICE_OUTPUT_RATE=48000` for the Jabra SPEAK 510 on the Raspberry Pi; that device rejects 24 kHz. Hardware must support the selected rates. Use an echo-cancelling USB speakerphone or configure system acoustic echo cancellation: the application does not implement AEC.
-
-The microphone streams continuously; server VAD determines speech turns. No push-to-talk. Try “Bring me the bottle” or “Stop.” The model receives `fetch_object` and `stop_robot` tools; only validated tool calls enter the coordinator. Speech-start events clear buffered playback. Physical stopping through voice depends on cloud connectivity and recognition; an independent local stop remains a hardware integration requirement.
-
-Live verification on September 19, 2026 accepted the audio/tool configuration and exercised a text-triggered `fetch_object` call through the cloud relay and simulated hardware, followed by provider speech audio. The Jabra microphone and speaker streams also opened successfully on Windows. **Spoken-command recognition and audible playback still need a human test.** A rejected configuration fails explicitly. No automatic reconnect or command replay is attempted.
-
-### Initial Windows/Jabra voice test
-
-Open three PowerShell terminals in this project directory. Use the same Python environment in each. Dependencies on the checked machine are already installed; for a fresh environment run `python -m pip install -e '.[audio,test]'`.
-
-Generate a shared secret once with `python -c "import secrets; print(secrets.token_urlsafe(32))"` and copy its output into all three terminals below.
-
-Terminal 1 (simulated robot):
-
-```powershell
-$env:ROBOT_TOKEN = 'PASTE_SHARED_SECRET'
-python -m robot_app.hardware
-```
-
-Terminal 2 (voice relay):
-
-```powershell
-$env:ROBOT_TOKEN = 'PASTE_SHARED_SECRET'
-$credential = Get-Credential -UserName 'Yibu' -Message 'Enter your Yibu API key as the password'
-$env:YIBU_API_KEY = $credential.GetNetworkCredential().Password
-python -m robot_app.cloud
-```
-
-Terminal 3 (microphone and speaker):
-
-```powershell
-$env:ROBOT_TOKEN = 'PASTE_SHARED_SECRET'
-$env:VOICE_URL = 'ws://127.0.0.1:8765'
-$env:ROBOT_URL = 'ws://127.0.0.1:8766'
-$env:CAMERA_URL = $env:ROBOT_URL
-python -m robot_app.voice --list-devices
-python -m robot_app.voice --input-device 1 --output-device 4
-```
-
-On the checked Windows machine, devices 1 and 4 are the Jabra SPEAK 510 using MME; both opened at the required rates. Device numbers can change after reconnecting. The WASAPI Jabra input did not accept 16 kHz, so use the verified MME pair for this test.
-
-Wait for `Listening continuously`, unmute the Jabra, and say:
-
-1. “Hello. Say hello back.” Confirm that you hear the reply through the Jabra.
-2. “Bring me the bottle.” Confirm terminal output contains `"state": "completed"` and `"simulated": true`, and the spoken reply identifies the simulation.
-3. “Stop.” Confirm terminal output contains `"state": "stopped"`.
-
-The simulator finishes quickly, so saying stop afterward checks the stop command but does not prove interruption during movement. Press Ctrl+C in the voice terminal first, then stop the other two services. If the microphone cannot open, check Windows microphone access for desktop apps and close other applications using the device. No physical robot movement is implemented.
-
-## Separate machines and cloud deployment
-
-Start the simulated hardware service on the hardware Pi with `--host 0.0.0.0`. Set `ROBOT_URL=ws://HARDWARE_PI_IP:8766` on the central Pi. When a camera service exists, set `CAMERA_URL=ws://CAMERA_PI_IP:8767`. Plain `ws://` is for a trusted private lab network only; use a private encrypted network or TLS for shared networks.
-
-### Raspberry Pi 5 deployment checklist
-
-The central Pi runs the microphone client only. Keep `YIBU_API_KEY` on the cloud relay; it is not needed on the central Pi.
-
-Install the central Pi:
-
-```bash
-sudo apt update
-sudo apt install -y python3-venv python3-pip libportaudio2
-cd ~/VLA-HTN
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e '.[audio]'
-python -m robot_app.voice --list-devices
-```
-
-For a one-Pi simulation, run hardware locally and use `ROBOT_URL=ws://127.0.0.1:8766`. For separate machines, use the following roles:
-
-| Machine | Command/configuration |
-| --- | --- |
-| Cloud relay | `python -m robot_app.cloud --host 0.0.0.0`; keep `YIBU_API_KEY` here |
-| Hardware Pi | `python -m robot_app.hardware --host 0.0.0.0` |
-| Central Pi | `python -m robot_app.voice --input-device INPUT_ID --output-device OUTPUT_ID` |
-
-On the central Pi, set the same `ROBOT_TOKEN` used by the other services, set `VOICE_URL=ws://CLOUD_RELAY_IP:8765`, `ROBOT_URL=ws://HARDWARE_PI_IP:8766`, and `CAMERA_URL=ws://CAMERA_PI_IP:8766`. Confirm the Pi can reach both ports before starting voice:
-
-```bash
-nc -vz CLOUD_RELAY_IP 8765
-nc -vz HARDWARE_PI_IP 8766
-```
-
-The Pi should print `Listening continuously`. Say “Bring me the bottle”; the simulator should produce `"state": "completed"` and `"simulated": true`. Do not connect a real robot until this network and audio test passes. The current `hardware.py` is simulated and does not drive motors or an arm.
-
-For a cloud VM:
-
-```bash
-docker build -t robot-voice .
-docker run --rm -p 127.0.0.1:8765:8765 \
-  -e ROBOT_TOKEN -e YIBU_API_KEY \
-  -v robot-usage:/app/artifacts robot-voice
-```
-
-From the central Pi, keep an SSH tunnel open:
-
-```bash
-ssh -N -L 8765:127.0.0.1:8765 user@YOUR_CLOUD_HOST
-```
-
-Then use `VOICE_URL=ws://127.0.0.1:8765`. The tunnel encrypts the cloud connection and the cloud port remains private. The container is provided but has not been built in this workspace. Keep the same token on the cloud and robot services; this initial design is for one robot, not a multi-tenant service.
-
-### Task decomposition and realtime checks
-
-The maintained application includes an optional DashScope Qwen 3.5 Plus decomposition
-adapter. Keep the key on the coordinator host, then enable it for an end-to-end run:
-
-```bash
-export DASHSCOPE_API_KEY='your-private-dashscope-key'
-export VLA_DECOMPOSER_ENABLED=1
-export ROBOT_WATCHDOG_TIMEOUT=30
-python -m robot_app.coordinator --target bottle
-```
-
-The response is validated before execution. The coordinator runs a local safety check
-before every robot command and sends the independent `stop` command if a command exceeds
-the watchdog deadline. Decomposition is disabled by default, so offline tests never make
-paid calls.
-
-Run the five pick/place/deliver decomposition samples with:
-
-```bash
-python -m robot_app.benchmarks --json
-```
-
-Run the complete offline Phase 1 check without an API key or hardware:
-
-```bash
-export VLA_PROVIDER=mock
-python -m robot_app.vla_integration_test --report artifacts/vla_integration_report.json
-```
-
-The report verifies simulated task completion, decomposition latency, object-location
-latency, feedback latency, frame rate, and the active safety watchdog. A passing report
-is a software-readiness result only; it does not validate Nav2, Arm 101, camera wiring,
-or Raspberry Pi motor control.
-
-`robot_app.action_monitor.RealtimeActionMonitor` paces camera feedback at 30 FPS and
-records maximum feedback latency. The RealSense source is configured for 30 FPS, but
-the 500 ms feedback target and physical camera/robot deployment still require a live
-hardware measurement.
-
-### Phase 2 hardware bridge
-
-The hardware service now supports an opt-in bridge backend. It keeps the same validated
-WebSocket command protocol while delegating navigation and manipulation to separate
-Pi-side bridge processes:
-
-```bash
-export ROBOT_TOKEN='same-secret-used-by-the-bridges'
-export NAV2_BRIDGE_URL='ws://NAV2_PI:8770'
-export ARM101_BRIDGE_URL='ws://ARM101_PI:8771'
-python -m robot_app.hardware --host 0.0.0.0 --backend bridge
-```
-
-The Nav2 bridge owns localization and base navigation; the Arm 101 bridge owns grasp,
-verification, and stow. Both must implement authenticated JSON `health`, action, and
-`stop` messages. The application does not guess a motor or serial protocol.
-
-Run the non-motion preflight from the coordinator Pi before enabling movement:
-
-```bash
-python -m robot_app.phase2_check \
-  --robot-url ws://HARDWARE_PI:8766 \
-  --camera-url ws://CAMERA_PI:8767 \
-  --nav2-url ws://NAV2_PI:8770 \
-  --arm-url ws://ARM101_PI:8771 \
-  --target bottle --frame map
-```
-
-The command checks robot pose, camera detection and calibration, and both bridge health
-responses. It never sends navigation, grasp, or stop-motion commands.
-
-## Hardware integration contract
-
-Every WebSocket connection carries one command and one completion acknowledgement. Stop uses a separate connection so it can interrupt a running command. There are no automatic retries. Commands carry unique IDs and Unix expiry times; synchronize clocks on all Pis. The service rejects duplicates during its process lifetime, expired requests, and simultaneous movements. Command disconnect or deadline expiry requests a driver stop.
-
-Request example:
-
-```json
-{"id":"unique-command-id","expires_at":1790000120,"action":"locate","target":"bottle","pose":null}
-```
-
-The example timestamp must be replaced with the current time plus the allowed deadline. Response:
-
-```json
-{"id":"unique-command-id","ok":true,"simulated":false,"result":{"target":"bottle","pose":{"frame":"map","x":1.2,"y":0.4,"z":0.7,"yaw":0},"observed_at":1790000000,"confidence":0.95},"error":null}
-```
-
-Distances are metres and angles radians. `observed_at` is the actual measurement time, not the time cached data was sent. Camera observations must already be transformed into the navigation frame using calibrated camera extrinsics and current localization. The coordinator rejects observations older than two seconds, confidence below 0.7, non-finite values, or mismatched frames. A detector's confidence is not a substitute for calibration or uncertainty estimation.
-
-Implement a driver replacing `SimulatedHardware` only after verifying the controller:
-
-| Action | Required real behavior/result |
-| --- | --- |
-| `save_start` | Return measured localized `pose` |
-| `locate` | Return a fresh object pose, timestamp, confidence; fail if ambiguous |
-| `approach` | Plan a collision-aware base pose within arm reach; don't drive the base to the object's XYZ |
-| `grasp` | Use calibrated transforms, inverse kinematics or a trained policy, and joint/gripper limits |
-| `verify_grasp` | Return measured `held: true/false` |
-| `stow` | Move the arm into a verified carrying configuration |
-| `return_start` | Navigate to the saved pose; report completion only after arrival |
-| `stop` | Stop base motion and safely hold/stow the arm as appropriate |
-
-The driver must expose `simulated = False`, an async `execute(Request) -> dict`, and an async `stop()`. Operations must allow concurrent stop/cancellation and enforce local watchdogs. USB serial is a likely SO-101 connection, but **no real arm or base driver is included yet**. Qwen supplies semantic task requests, not a trained VLA motor policy. Depth processing, SLAM/navigation, grasp planning, and camera-to-arm calibration remain hardware work.
-
-## Usage reporting
-
-```bash
-python -m robot_app.audit --log artifacts/yibu_api_calls.jsonl --out-dir artifacts/summary
-```
-
-This creates `usage_summary.json` and `usage_by_model_key_purpose.csv`. Ledger records follow the linked `yibu_call_audit_v1` schema and preserve unknown usage as null. One completed response produces one record; incomplete/failed sessions produce an additional unknown-usage record. Thus call counts describe response records, not WebSocket sessions. No prompts, audio, transcripts, or full keys are intentionally logged. Original usage metadata is preserved. Summary layout is custom; the linked package's summarizer can also consume the ledger.
-
-The organizer guide asks teams to return reports by September 20, 2026, 11:59 PM America/Toronto. Review reports and mention this custom per-response accounting when submitting them. Nothing is emailed automatically.
-
-Sources:
-- [User-supplied Yibu documentation, pinned commit](https://github.com/7nr754rpby-cmyk/OMNI-Live-Build-the-Next-Generation-of-Real-Time-Multimodal-AI/blob/6244ce145d2689544c0929a371adff47f0916383/docs/yibuapi-usage-reporting.md)
-- [Qwen realtime client events](https://www.alibabacloud.com/help/en/model-studio/client-events)
-- [SO-101 setup and calibration](https://huggingface.co/docs/lerobot/so101)
-
-## Verification
-
-```bash
-python -m pytest -q
-```
-
-Tests exercise actual loopback WebSockets with simulated hardware/provider traffic, including fetch/return, cancellation, disconnect, duplicate/expired requests, failed grasps, invalid observations, and usage accounting. No paid provider calls are made.
+</div>

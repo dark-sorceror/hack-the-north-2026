@@ -852,7 +852,7 @@ class FakePiScriptTest(unittest.TestCase):
         )
         self.assertEqual(out.returncode, 2)
         # no pyserial: how to install it; with pyserial: names the port it could not open
-        self.assertTrue("pi/setup.sh" in out.stderr or port in out.stderr, out.stderr)
+        self.assertTrue("nav-pi/setup.sh" in out.stderr or port in out.stderr, out.stderr)
 
 
 class ImportTest(unittest.TestCase):

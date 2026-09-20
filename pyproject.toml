@@ -3,20 +3,28 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vla-htn"
+name = "retriever"
 version = "0.1.0"
-description = "WebSocket voice and task coordination for a multi-Pi robot"
-requires-python = ">=3.11"
+description = "A robot that finds things, decides what to do with them, and acts"
+requires-python = ">=3.10"
+# The core, the Pi bridge and the navigation stack are stdlib-only by design.
+# websockets/pydantic are here only for the root-level robot_app/vla_core tree,
+# and can go with it once that parallel implementation is resolved.
 dependencies = ["websockets>=15,<16", "pydantic>=2.10,<3"]
 
 [project.optional-dependencies]
 audio = ["sounddevice>=0.5,<0.6"]
-camera = ["numpy>=2,<3", "pillow>=10,<13", "ultralytics>=8.3,<9"]
+camera = ["numpy>=2,<3", "pillow>=10,<13"]
 camera-realsense = ["pyrealsense2>=2.56"]
 test = ["pytest>=8,<10"]
 
 [tool.setuptools.packages.find]
-include = ["robot_app*", "vla_core*"]
+where = ["src", "."]
+include = ["retriever*", "robot_app*", "vla_core*", "hardware_bridge*"]
+
+[tool.ruff]
+line-length = 96
+target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
