@@ -246,30 +246,57 @@ class BubbleDecision:
 # ---------------------------------------------------------------- masks
 
 
-def in_mask(angle: float, mask: Sequence[tuple[float, float]]) -> bool:
+def in_mask(angle: float, mask: Sequence[tuple[float, ...]],
+            range_m: float | None = None) -> bool:
+    """Is this ray masked? With a range, a sector that carries a limit only
+    masks returns CLOSER than it.
+
+    A sector mask blinds the robot at every range in that direction, which is
+    the right answer for a wheel (it fills the view) and the wrong one for a
+    bracket standing off the chassis: beams get past it, and blanking the whole
+    sector hides real obstacles out there. A ranged sector hides the bracket and
+    keeps the room behind it."""
     a = angle % TAU
-    for a0, a1 in mask:
-        if (a0 <= a <= a1) if a0 <= a1 else (a >= a0 or a <= a1):
+    for entry in mask:
+        a0, a1 = entry[0], entry[1]
+        limit = entry[2] if len(entry) > 2 else math.inf
+        if not ((a0 <= a <= a1) if a0 <= a1 else (a >= a0 or a <= a1)):
+            continue
+        if range_m is None or range_m <= limit:
             return True
     return False
 
 
-def parse_mask(text: str | None) -> tuple[tuple[float, float], ...]:
+def parse_mask(text: str | None) -> tuple[tuple[float, ...], ...]:
     """'100:140,350:10' (degrees, lidar frame, CCW from the 0 mark) -> radians.
-    350:10 wraps through 0. The format lidar_check.py --record-mask prints."""
+    350:10 wraps through 0. The format lidar_check.py --record-mask prints.
+
+    A third field limits the mask by range: '266:290:0.5' hides returns in that
+    sector closer than 0.5 m -- the bracket standing off the chassis -- and
+    leaves anything beyond it visible. Without one the whole sector is blind at
+    every range, which is what a wheel needs and what a bracket does not."""
     if not text:
         return ()
-    out = []
+    out: list[tuple[float, ...]] = []
     for part in text.split(","):
         part = part.strip()
         if not part:
             continue
+        bits = part.split(":")
         try:
-            a, b = (float(v) for v in part.split(":"))
+            if len(bits) == 2:
+                a, b = (float(v) for v in bits)
+                out.append((math.radians(a) % TAU, math.radians(b) % TAU))
+            elif len(bits) == 3:
+                a, b, r = (float(v) for v in bits)
+                if r <= 0:
+                    raise ValueError
+                out.append((math.radians(a) % TAU, math.radians(b) % TAU, r))
+            else:
+                raise ValueError
         except ValueError:
-            raise ValueError(
-                f"bad mask interval {part!r}; expected START:END in degrees") from None
-        out.append((math.radians(a) % TAU, math.radians(b) % TAU))
+            raise ValueError(f"bad mask interval {part!r}; expected START:END or "
+                             "START:END:MAX_RANGE_M, degrees and metres") from None
     return tuple(out)
 
 
@@ -389,7 +416,7 @@ class SafetyBubble:
         prev, bins = self._prev_bins, {}
         pts = []
         for a, r, q in scan.points:
-            if r < c.min_range_m or q <= 0 or in_mask(a, c.mask):
+            if r < c.min_range_m or q <= 0 or in_mask(a, c.mask, r):
                 continue
             b = sample_bin(a)
             bins.setdefault(b, []).append(r)
