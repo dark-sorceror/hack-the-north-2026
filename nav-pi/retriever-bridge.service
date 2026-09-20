@@ -1,7 +1,7 @@
 # systemd unit: the bridge starts on boot and restarts if it dies.
 #
 # A robot whose bridge needs someone to ssh in and start it is a robot that
-# does not move after a battery swap. Install with pi/setup.sh.
+# does not move after a battery swap. Install with nav-pi/setup.sh.
 [Unit]
 Description=Retriever Pi bridge (laptop <-> motors/arms, with watchdog)
 After=network-online.target
@@ -14,8 +14,8 @@ StartLimitIntervalSec=0
 Type=simple
 User=__USER__
 WorkingDirectory=__HOME__/retriever
-# The bridge arguments are what pi/setup.sh was given: --driver fake by default,
-#   bash pi/setup.sh --driver real          for the DDSM115 wheels (adapter auto-found)
+# The bridge arguments are what nav-pi/setup.sh was given: --driver fake by default,
+#   bash nav-pi/setup.sh --driver real          for the DDSM115 wheels (adapter auto-found)
 # With --driver real and the wheel adapter unplugged, the bridge exits and
 # systemd retries every second, so plugging it in later is enough.
 #

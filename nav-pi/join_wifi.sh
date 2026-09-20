@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Put the Pi on a Wi-Fi network for good, the robot way. Run ON the Pi:
 #
-#   sudo bash pi/join_wifi.sh "Hao's iPhone" PASSWORD          # priority 10
-#   sudo bash pi/join_wifi.sh "TeamRouter" PASSWORD 20          # preferred when in range
-#   sudo bash pi/join_wifi.sh "ASUS_30" "" 20                   # an OPEN network: "" password
+#   sudo bash nav-pi/join_wifi.sh "Hao's iPhone" PASSWORD          # priority 10
+#   sudo bash nav-pi/join_wifi.sh "TeamRouter" PASSWORD 20          # preferred when in range
+#   sudo bash nav-pi/join_wifi.sh "ASUS_30" "" 20                   # an OPEN network: "" password
 #
 # The robot runs untethered: the Pi rides on it and the Mac reaches it over
 # Wi-Fi, so both must join the same network (a phone hotspot or a travel
@@ -22,7 +22,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
-  echo "usage: sudo bash pi/join_wifi.sh \"NETWORK NAME\" PASSWORD [PRIORITY]" >&2
+  echo "usage: sudo bash nav-pi/join_wifi.sh \"NETWORK NAME\" PASSWORD [PRIORITY]" >&2
   exit 2
 fi
 if [ "$(id -u)" -ne 0 ]; then
