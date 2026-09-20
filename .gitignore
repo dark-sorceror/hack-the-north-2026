@@ -1,0 +1,3 @@
+# dataset tarballs staged for upload - large, regenerable from the board
+scripts/baseten/*.tar.gz
+__pycache__/

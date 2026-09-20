@@ -6,9 +6,9 @@ SMOKE="${SMOKE:-1}"          # 1 = short pipeline check, 0 = real training run
 MULTI_GPU="${MULTI_GPU:-0}"  # 1 = launch under accelerate (set GPU_COUNT>1 too)
 NPROC="${NPROC:-4}"
 
-DATA_TARBALL="${DATA_TARBALL:-pickup_v1_10ep.tar.gz}"
-DATA_DIR="${DATA_DIR:-archive_pickup_v1_10ep_0920_1126}"
-REPO_ID="${REPO_ID:-local/pickup_v1}"
+DATA_TARBALL="${DATA_TARBALL:-pickup_v2_56ep.tar.gz}"
+DATA_DIR="${DATA_DIR:-pickup_v2}"
+REPO_ID="${REPO_ID:-local/pickup_v2}"
 
 echo "=== environment ==="
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'gpus', torch.cuda.device_count())"

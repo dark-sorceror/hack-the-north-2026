@@ -36,7 +36,7 @@ BASE_IMAGE = "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime"
 GPU_COUNT = 1
 
 training_runtime = Runtime(
-    start_commands=["chmod +x ./run.sh && ./run.sh"],
+    start_commands=["chmod +x ./run.sh && SMOKE=0 ./run.sh"],
     # Reuses the pip install and any cached dataset across jobs - worth having
     # when iterating, since installing lerobot is the slowest part of a short run.
     cache_config=CacheConfig(enabled=True),
