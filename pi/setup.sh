@@ -64,7 +64,7 @@ fi
 # a missing group in the unit's SupplementaryGroups makes systemd refuse to
 # start the service at all (status 216/GROUP), which is a bad way to find out.
 GROUPS_OK=""
-for g in dialout gpio plugdev; do
+for g in dialout gpio plugdev i2c; do
   if getent group "$g" > /dev/null; then
     sudo usermod -aG "$g" "$USER" || true
     GROUPS_OK="$GROUPS_OK $g"
