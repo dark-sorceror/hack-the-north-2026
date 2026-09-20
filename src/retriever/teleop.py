@@ -343,6 +343,7 @@ class TeleopSession:
         # close-range sight for stopping, with its own per-sector self-mask.
         self.map_min_range_m = float(map_min_range_m)
         self._last_cmd = Action()
+        self._recorded_route: list[tuple[float, float]] | None = None
         self._threads: list[threading.Thread] = []
         self._obs: Any = None                  # the latest Observation, for click-to-go
         self.auto: _Auto | None = None
@@ -829,6 +830,16 @@ class TeleopSession:
             x=round(p.x, 4), y=round(p.y, 4), th=round(p.theta, 5),
             cvx=round(cmd.base_vx, 3), cwz=round(cmd.base_wz, 3),
             estop=bool(getattr(state, "estop", False)))
+        route = None
+        with self._lock:
+            a = self.auto
+            ctl = getattr(a, "ctl", None) if a is not None else None
+            path = getattr(ctl, "path", None) if ctl is not None else None
+            if path and path != self._recorded_route:
+                self._recorded_route = list(path)
+                route = [[round(x, 3), round(y, 3)] for x, y in path]
+        if route is not None:                  # only when it CHANGES: a route per replan
+            self.recorder.write("route", t=round(obs.t, 4), pts=route)
         if new_scan:
             self.recorder.write("scan", t=round(scan.t, 4),
                                 pts=[[round(x, 3), round(y, 3)] for x, y, *_ in scan.points])
@@ -979,7 +990,12 @@ class TeleopSession:
         snap["map"] = None if mapper is None else mapper.page_view()
         snap["map_stats"] = None if mapper is None else {
             "scans": mapper.scans, "skipped": self.map_skipped,
-            "camera_points": mapper.camera_points}
+            "camera_points": mapper.camera_points,
+            # for diagnosing a map that stays empty: the scan's clock against
+            # the pose history's, both on the bridge's clock
+            "scan_t": None if self._seen.scan_t is None else round(self._seen.scan_t, 2),
+            "history": ([round(self._history[0][0], 2), round(self._history[-1][0], 2)]
+                        if len(self._history) > 1 else None)}
         cam = self.camera
         snap["camera"] = None if cam is None else {
             "age_s": None if not math.isfinite(cam.age()) else round(cam.age(), 2),
