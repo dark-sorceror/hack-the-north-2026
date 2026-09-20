@@ -15,13 +15,13 @@ Port: auto-detected (WCH CH34x chip). Override with Bus(port=...) or env DDSM115
 (Windows e.g. COM5, Pi 5 usually /dev/ttyACM0). On Linux: sudo usermod -aG dialout $USER, then re-login.
 
 VENDORED (retriever): a teammate's file, known to drive the real chassis over a
-Waveshare USB-RS485 adapter. Kept verbatim so it can be diffed against theirs.
-The one change is the guarded pyserial import below: with pyserial missing,
+Waveshare USB-RS485 adapter. Kept as close to theirs as possible so the two can
+be diffed. The one behavioural change is the guarded pyserial import below: with pyserial missing,
 the pure frame/CRC/parse functions still import (the bridge's tests and its
 stdlib-only fake mode need that), and Bus()/find_port() raise ImportError
 instead. With pyserial installed, behaviour is identical. The bridge driver,
 retriever.bridge.drivers.DDSM115Driver, builds on the frame functions here
-and does its own bounded I/O; see docs/pi-hardware.md.
+and does its own bounded I/O.
 """
 import os, struct, sys, threading, time
 try:
@@ -30,8 +30,8 @@ try:
 except ImportError:  # retriever: the only change from the teammate's file (see docstring)
     class _NoPyserial:
         def __getattr__(self, name):
-            raise ImportError("pyserial is not installed; on an offline Pi install "
-                              "pi/wheels/pyserial-*.whl (docs/pi-hardware.md)")
+            raise ImportError("pyserial is not installed: on the Pi, pi/setup.sh "
+                              "installs it (python3-serial); elsewhere, pip install pyserial")
     serial = list_ports = _NoPyserial()
 
 CURRENT, VELOCITY, POSITION = 1, 2, 3
