@@ -23,10 +23,17 @@ cd ~/hiwonder-SoArm-101 && ./.venv/bin/python ~/fetch.py --no-handoff
 | Blocks for | ~7 s model load + up to 45 s rollout |
 | Exit `0` | object is grasped, arm is holding it |
 | Exit `1` | aborted (timeout or failure); arm holds position, no object |
+| Exit `3` | stopped on `SIGTERM`/`SIGINT`; arm holds position where it got to |
 | stdout | one JSON object per line (see §4) |
 
 Autonomous — no keyboard, no operator. It decides for itself when the grasp has
 happened.
+
+**To stop a pickup early, send `SIGTERM`.** The run finishes the control step it
+is in, disconnects cleanly and exits `3` — see §5. Exit `3` says nothing about
+the object: read `grasped` on the `done` line to find out whether the arm is
+holding it. `2` is never returned by the run itself; it is argparse rejecting
+the command line.
 
 ### Command B — handoff
 
@@ -172,7 +179,14 @@ the authoritative result.
 {"event":"ready","load_s":6.6,"grip_register":"Present_Current","timeout_s":45.0}
 {"event":"step","n":12,"t":12.4,"hz":0.97,"grip_pos":11.4,"grip_raw":480}
 {"event":"grasped","n":34,"reason":"gripper_unresponsive"}
-{"event":"done","status":"succeeded","reason":"gripper_unresponsive","steps":34,"handoff":false,"elapsed_s":41.2}
+{"event":"done","status":"succeeded","reason":"gripper_unresponsive","steps":34,"grasped":true,"handoff":false,"elapsed_s":41.2}
+```
+
+A run that was told to stop (§5) ends like this instead:
+
+```json
+{"event":"stopping","reason":"sigterm","n":18}
+{"event":"done","status":"stopped","reason":"sigterm","steps":18,"grasped":false,"handoff":false,"elapsed_s":19.4}
 ```
 
 | event | meaning |
@@ -181,7 +195,9 @@ the authoritative result.
 | `step` | one control iteration. `hz` is the real loop rate, `grip_raw` is gripper load |
 | `grasped` | success detected, loop is exiting |
 | `read_error` | a servo read failed; transient unless followed by `grasped` |
-| `done` | terminal. `status` is `succeeded` or `aborted` |
+| `stopping` | a stop signal arrived; the loop leaves at the next step boundary. `reason` is `sigterm` or `sigint` |
+| `handoff_stopped` | a stop signal arrived mid-handoff; the sweep stopped there |
+| `done` | terminal. `status` is `succeeded`, `aborted` or `stopped`; `grasped` says whether the object is held, whatever the status |
 
 **`hz` will read ~1.0, not 30.** That is expected and not a bug — see §6.
 
@@ -195,9 +211,19 @@ the handoff pose).
 
 These are not style preferences. Each one corresponds to a failure we hit.
 
-**Never `Ctrl-C` the arm scripts.** It orphans the process holding the serial
-port and skips the clean shutdown. Send `SIGTERM` and let them exit, or let them
-run to completion.
+**`fetch.py` stops on `SIGTERM` or `SIGINT` — nothing else.** The signal does
+not kill it. It sets a flag the action loop reads *between* control steps, so
+the step in flight finishes, the handoff sweep stops where it is, and the run
+takes the same shutdown the timeout takes: `robot.disconnect()` runs, torque
+stays on, exit `3`. Allow it up to ~1 s (one inference) to notice. A second
+signal is ignored on purpose — there is no faster clean stop. `SIGKILL` skips
+the disconnect and orphans `/dev/soarm_follower`, which is the failure this
+exists to avoid; use it only if the process is genuinely wedged.
+
+**Never `Ctrl-C` — or `SIGTERM` — the other arm flows.** `run_goose.sh` and
+`arm_poses.py` have no such handler: interrupting them orphans the process
+holding the serial port and skips the clean shutdown. Let them run to
+completion. Only `fetch.py` has a stop path.
 
 **Do not power-cycle the arm between pickup and handoff.** The gripper holds the
 object by tripping its overload protection and latching. Cutting power releases
@@ -239,6 +265,8 @@ pickup and don't treat the slow-loop warnings as errors.
 | `Missing motor IDs: 1` (or others) at connect | flaky handshake | retry; the bus has retry patches but isn't perfect |
 | Port busy / garbled reads | two processes on the serial port | ensure only one command runs at a time |
 | `fetch.py` exits 1 immediately | camera or checkpoint missing | check the `loading`/`ready` lines |
+| `fetch.py` does not exit the instant you `SIGTERM` it | it is finishing the control step in flight | wait ~1–2 s for the `stopping` then `done` lines; `SIGKILL` only if it never comes |
+| `fetch.py` exits 3 unexpectedly | something sent it a signal (a service stop, a `kill`, a closing SSH session) | it stopped cleanly; check `grasped` on the `done` line before re-running |
 | Arm goes limp | torque released | re-run; check nothing passed `disable_torque_on_disconnect=true` |
 | `ValueError: Magnitude N exceeds 2047` | calibration/horn problem | do **not** recalibrate blindly — see §2 |
 
@@ -264,8 +292,16 @@ press `q`**, so it is not usable on the robot. Keep it for bench testing only.
   fault, not a designed signal. `--grip-threshold N` would trigger earlier on
   measured load instead; the value has not been chosen from real telemetry yet.
   Every `step` event logs `grip_raw` so it can be set later.
+- Stopping a pickup reaches the arm *only* as a signal on this board. The
+  robot's other stop layers — the bridge watchdog, the motion deadman, the
+  e-stop latch, the QNX heartbeat — all stop the drivetrain and none of them
+  reach `fetch.py`, which opens no socket. Press the e-stop mid-pickup and the
+  base halts while the arm finishes its step. Wiring the arm into that chain
+  needs the cancel endpoint below.
 
 **Planned, not built:**
+- A cancel endpoint the Pi5 can call, so the e-stop chain can stop the arm
+  without an SSH session and a `kill`. Today `SIGTERM` is the only way in.
 - A WebSocket action server on the board so the Pi5 can trigger these over the
   network instead of over SSH, with goal/feedback/result semantics like a ROS2
   action. Until that exists, **SSH + exit code is the interface.**
