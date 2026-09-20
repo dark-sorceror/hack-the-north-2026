@@ -5,9 +5,12 @@ axis-aligned boxes from a known camera mount, so the expected answer is
 geometry, not a recording. numpy only.
 """
 
+import base64
 import math
 import sys
+import time
 import unittest
+import zlib
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -18,6 +21,9 @@ if HAVE_NUMPY:
     import numpy as np
 
 from retriever.perception.depth_obstacles import (
+    CameraObstacleSource,
+    calibrate,
+    depth_camera_intrinsics,
     fit_floor,
     grid_intrinsics,
     obstacle_points,
@@ -137,6 +143,161 @@ class TestFitFloor(unittest.TestCase):
     def test_needs_floor_in_view(self):
         with self.assertRaises(ValueError):
             fit_floor(np.zeros((H, W)), INTR)
+
+
+def grid_message(depth_m, cell_px=1, age_s=0.05, seq=1):
+    """A wire-shaped message from the depth publisher carrying `depth_m` as its grid."""
+    mm = np.clip(np.rint(depth_m * 1000.0), 0, 65535).astype("<u2")
+    h, w = depth_m.shape
+    return {"t": 0.0, "seq": seq, "frame_w": w * cell_px, "frame_h": h * cell_px,
+            "detections": [], "age_s": age_s,
+            "depth_grid": {"b64": base64.b64encode(zlib.compress(mm.tobytes(), 1)).decode(),
+                           "w": w, "h": h, "cell_px": cell_px, "encoding": "zlib+<u2",
+                           "scale_m": 0.001}}
+
+
+def camstream_header(intr=INTR, w=W, h=H, aligned=False):
+    """The publisher's header message, the one depth_camera_intrinsics reads."""
+    return {"type": "header", "frame_w": w, "frame_h": h, "camera": "d435i-qnx",
+            "detector": None, "intrinsics": None,
+            "depth": {"aligned": aligned,
+                      "intrinsics": {"fx": intr.fx, "fy": intr.fy, "cx": intr.cx,
+                                     "cy": intr.cy, "width": w, "height": h}}}
+
+
+class StubFrame:
+    """One packet off the camera stream, with what the source reads from it: how long
+    ago it reached this laptop, how old it was when sent, and its depth grid."""
+
+    def __init__(self, message, received_at):
+        self.message = message
+        self.received_at = received_at
+        self.depth_grid = message.get("depth_grid")
+        self.source_age_s = message.get("age_s")
+
+    @property
+    def age(self):
+        return time.monotonic() - self.received_at
+
+    def depth_grid_m(self):
+        grid = self.depth_grid
+        if grid is None:
+            return None
+        raw = zlib.decompress(base64.b64decode(grid["b64"]))
+        return np.frombuffer(raw, "<u2").reshape(grid["h"], grid["w"]) * grid["scale_m"]
+
+
+class StubRemote:
+    def __init__(self, header=None, packet=None, staleness=0.0):
+        self.header, self.packet, self._stale, self.stopped = header, packet, staleness, False
+
+    def latest_packet(self):
+        return self.packet
+
+    def staleness(self):
+        return self._stale
+
+    def stop(self):
+        self.stopped = True
+
+
+class TestDepthCameraIntrinsics(unittest.TestCase):
+    """The depth camera's own numbers out of the publisher's header: without them
+    nothing can be projected, and guessing would quietly bend the whole map."""
+
+    def test_reads_the_depth_cameras_own_intrinsics_and_size(self):
+        found = depth_camera_intrinsics(camstream_header())
+        self.assertIsNotNone(found)
+        self.assertEqual(found[0], INTR)
+        self.assertEqual(found[1], (W, H))
+
+    def test_depth_aligned_to_colour_is_refused(self):
+        # Aligned depth is in the COLOUR camera's frame: these numbers would misplace it.
+        self.assertIsNone(depth_camera_intrinsics(camstream_header(aligned=True)))
+
+    def test_no_header_yet_is_none_not_a_crash(self):
+        self.assertIsNone(depth_camera_intrinsics(None))
+        self.assertIsNone(depth_camera_intrinsics("header"))
+
+    def test_a_header_without_depth_intrinsics_is_none(self):
+        header = camstream_header()
+        header.pop("depth")
+        self.assertIsNone(depth_camera_intrinsics(header))
+        self.assertIsNone(depth_camera_intrinsics({"depth": {"aligned": False}}))
+        self.assertIsNone(depth_camera_intrinsics({"depth": {"intrinsics": None}}))
+
+    def test_malformed_numbers_are_none(self):
+        for spoil in ({"fx": None}, {"fy": "wide"}, {"fx": 0.0}, {"width": 0},
+                      {"cx": float("nan")}):
+            with self.subTest(spoil=spoil):
+                header = camstream_header()
+                header["depth"]["intrinsics"].update(spoil)
+                self.assertIsNone(depth_camera_intrinsics(header))
+        missing = camstream_header()
+        missing["depth"]["intrinsics"].pop("height")
+        self.assertIsNone(depth_camera_intrinsics(missing))
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed")
+class TestCameraObstacleSource(unittest.TestCase):
+    """The contract navigation consumes: latest(), age(), describe(), all on the
+    laptop's monotonic clock."""
+
+    def packet(self, depth, received_ago=0.2, age_s=0.05, seq=1):
+        return StubFrame(grid_message(depth, age_s=age_s, seq=seq),
+                         received_at=time.monotonic() - received_ago)
+
+    def source(self, remote, clock=lambda: 100.0):
+        return CameraObstacleSource(remote, MOUNT, clock=clock)
+
+    def test_a_box_in_the_stream_becomes_points_dated_at_capture_time(self):
+        box = (1.0, 1.3, -0.15, 0.15, 0.0, 0.25)
+        src = self.source(StubRemote(camstream_header(), self.packet(render(MOUNT, [box]))))
+        obs = src.latest()
+        # captured = now - how long ago it arrived - how old it was when sent
+        self.assertAlmostEqual(obs.t, 100.0 - 0.2 - 0.05, delta=0.02)
+        self.assertAlmostEqual(math.hypot(*nearest(obs.points)), 1.0, delta=0.05)
+        self.assertEqual(src.last_points, len(obs.points))
+
+    def test_one_packet_is_dated_once(self):
+        src = self.source(StubRemote(camstream_header(), self.packet(render(MOUNT))))
+        self.assertIs(src.latest(), src.latest())
+
+    def test_no_packet_or_no_depth_intrinsics_means_none(self):
+        self.assertIsNone(self.source(StubRemote(camstream_header(), None)).latest())
+        no_intr = StubRemote(None, self.packet(render(MOUNT)))
+        with self.assertLogs("retriever.perception.depth_obstacles", "WARNING"):
+            self.assertIsNone(self.source(no_intr).latest())
+
+    def test_age_and_stop_pass_through_to_the_stream(self):
+        remote = StubRemote(camstream_header(), None, staleness=2.5)
+        src = self.source(remote)
+        self.assertEqual(src.age(), 2.5)
+        src.stop()
+        self.assertTrue(remote.stopped)
+
+    def test_describe_says_what_is_nearest_left_ahead_and_right(self):
+        box = (1.0, 1.3, -0.15, 0.15, 0.0, 0.25)
+        line = self.source(StubRemote(camstream_header(),
+                                      self.packet(render(MOUNT, [box])))).describe()
+        self.assertIn("points", line)
+        self.assertIn("ahead 1.0", line)
+
+    def test_describe_says_when_there_is_no_stream_yet_or_it_went_quiet(self):
+        self.assertIn("waiting", self.source(StubRemote(camstream_header(), None,
+                                                        staleness=math.inf)).describe())
+        self.assertIn("2.0 s", self.source(StubRemote(camstream_header(), None,
+                                                      staleness=2.0)).describe())
+
+    def test_calibrate_reads_the_mount_from_the_stream(self):
+        h, p = calibrate(StubRemote(camstream_header(), self.packet(render(MOUNT))),
+                         timeout_s=0.1)
+        self.assertAlmostEqual(h, MOUNT.height_m, delta=0.01)
+        self.assertAlmostEqual(p, MOUNT.pitch_rad, delta=0.01)
+
+    def test_calibrate_times_out_without_a_stream(self):
+        with self.assertRaises(TimeoutError):
+            calibrate(StubRemote(camstream_header(), None), timeout_s=0.05, poll_s=0.01)
 
 
 if __name__ == "__main__":

@@ -15,11 +15,16 @@ this module needs nothing installed.
 """
 from __future__ import annotations
 
+import logging
 import math
+import threading
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from retriever.perception.projection import CameraMount, Intrinsics, camera_to_base, deproject
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,37 @@ def grid_intrinsics(intr: Intrinsics, cell_px: int) -> Intrinsics:
     x = j*k + (k - 1)/2, so grid u = (x + 0.5)/k - 0.5."""
     k = float(cell_px)
     return Intrinsics(intr.fx / k, intr.fy / k, (intr.cx + 0.5) / k - 0.5, (intr.cy + 0.5) / k - 0.5)
+
+
+def depth_camera_intrinsics(header: Any) -> tuple[Intrinsics, tuple[int, int]] | None:
+    """The DEPTH camera's own intrinsics and (width, height) from the publisher's header
+    message, or None when there are none to project with.
+
+    None covers three cases that all mean the same thing to a caller — wait, do not
+    guess: no header has arrived yet, the header carries no usable depth intrinsics, or
+    it says the depth grid is ALIGNED to the colour image. Aligned depth is in the COLOUR
+    camera's frame, so projecting it with the depth camera's numbers would put every
+    point in the wrong place; a publisher that changes its mind about alignment must not
+    be able to turn this into a silent, slightly-wrong map. Never raises: a header from
+    an older publisher is a normal thing to meet, not an error.
+    """
+    if not isinstance(header, dict):
+        return None
+    depth = header.get("depth")
+    if not isinstance(depth, dict) or depth.get("aligned"):
+        return None
+    numbers = depth.get("intrinsics")
+    if not isinstance(numbers, dict):
+        return None
+    try:
+        intr = Intrinsics(float(numbers["fx"]), float(numbers["fy"]),
+                          float(numbers["cx"]), float(numbers["cy"]))
+        width, height = int(numbers["width"]), int(numbers["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return intr, (width, height)
 
 
 def base_points(grid_m: Any, intr: Intrinsics, mount: CameraMount):
@@ -107,3 +143,116 @@ def fit_floor(grid_m: Any, intr: Intrinsics, rows: float = 0.5) -> tuple[float, 
     b, a = np.polyfit(z[ok], y[ok], 1)
     pitch = math.atan(-b)
     return float(a * math.cos(pitch)), float(pitch)
+
+
+@dataclass(frozen=True)
+class CameraObstacles:
+    """What the camera says is in the way: the hand-off to navigation.
+
+    points: (x forward, y left) metres in the ROBOT frame at capture time.
+    t:      capture time on the laptop's time.monotonic(), so navigation can
+            look up the pose it had then, as it does for lidar scans.
+    Block-only: an empty tuple means "nothing seen in the way", never "free".
+    """
+
+    t: float
+    points: tuple[tuple[float, float], ...]
+
+
+class CameraObstacleSource:
+    """The newest depth grid on the robot-camera stream, as CameraObstacles.
+
+    Dating. The stream's `t` is the publisher's wall clock and is never
+    comparable with ours. What IS known: how long ago this laptop received the
+    packet (the frame's `age`, our monotonic clock) and how old the frame was
+    when it was sent (`source_age_s`, the publisher's monotonic clock). So it
+    was captured about age + source_age_s ago. A packet is dated once, the
+    first time it is seen: a stalled stream keeps handing back the same
+    CameraObstacles with its old t, which is what lets navigation age it out.
+
+    None without a packet, a depth grid, or depth intrinsics in the header (the
+    last is logged once). Non-blocking and thread-safe: the control loop calls
+    latest() about 20 times a second, and a dashboard may call describe() too.
+    """
+
+    def __init__(self, remote: Any, mount: CameraMount = DEFAULT_MOUNT,
+                 cfg: CameraObstacleConfig = CameraObstacleConfig(),
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.remote = remote
+        self.mount = mount
+        self.cfg = cfg
+        self.clock = clock
+        self.last_points = 0
+        self._lock = threading.Lock()
+        self._pkt: Any = None
+        self._obs: CameraObstacles | None = None
+        self._warned = False
+
+    def latest(self) -> CameraObstacles | None:
+        """The newest frame's obstacle points, or None. Cheap to call: a packet
+        already turned into points is handed back as it is."""
+        with self._lock:
+            pkt = self.remote.latest_packet()
+            if pkt is None:
+                return None
+            if pkt is self._pkt:
+                return self._obs
+            found = depth_camera_intrinsics(self.remote.header)
+            if found is None:
+                if not self._warned:
+                    log.warning("the camera stream's header has no depth-camera intrinsics: "
+                                "no camera obstacles until it does")
+                    self._warned = True
+                return None
+            cell = int((pkt.depth_grid or {}).get("cell_px") or 1)
+            grid = pkt.depth_grid_m()
+            if grid is None:
+                return None
+            pts = obstacle_points(grid, grid_intrinsics(found[0], cell), self.mount, self.cfg)
+            self._pkt = pkt
+            self._obs = CameraObstacles(self.clock() - pkt.age - (pkt.source_age_s or 0.0),
+                                        tuple(pts))
+            self.last_points = len(pts)
+            return self._obs
+
+    def age(self) -> float:
+        """Seconds since the stream last delivered anything (inf: never)."""
+        return self.remote.staleness()
+
+    def describe(self) -> str:
+        """One line for a dashboard or the bench: how many points, and the
+        nearest one to the left (> 15 degrees), ahead, and to the right."""
+        age = self.age()
+        obs = self.latest()
+        if obs is None:
+            return ("waiting for the camera stream" if math.isinf(age)
+                    else f"no points (stream {age:.1f} s old)")
+        near = {"left": math.inf, "ahead": math.inf, "right": math.inf}
+        for x, y in obs.points:
+            bearing = math.degrees(math.atan2(y, x))
+            side = "left" if bearing > 15 else ("right" if bearing < -15 else "ahead")
+            near[side] = min(near[side], math.hypot(x, y))
+        parts = [f"{side} {d:.2f} m" for side, d in near.items() if d < math.inf]
+        return f"{len(obs.points)} points" + (": " + ", ".join(parts) if parts else "")
+
+    def stop(self) -> None:
+        self.remote.stop()
+
+
+def calibrate(remote: Any, timeout_s: float = 10.0, poll_s: float = 0.05) -> tuple[float, float]:
+    """(height_m, pitch_rad) of the camera from the stream's next depth grid,
+    with open floor in front of it (fit_floor). Raises TimeoutError when no grid
+    with depth-camera intrinsics arrives within timeout_s."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        pkt = remote.latest_packet()
+        found = depth_camera_intrinsics(remote.header)
+        if pkt is not None and found is not None:
+            cell = int((pkt.depth_grid or {}).get("cell_px") or 1)
+            grid = pkt.depth_grid_m()
+            if grid is not None:
+                return fit_floor(grid, grid_intrinsics(found[0], cell))
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"no depth grid with depth-camera intrinsics within "
+                               f"{timeout_s:.0f} s: is the depth publisher running?")
+        time.sleep(poll_s)
