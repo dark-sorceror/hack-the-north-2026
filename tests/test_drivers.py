@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import math
 import unittest
+from unittest import mock
 
 from retriever.backends.fake import MAX_JOINT_RATE
 from retriever.backends.tank import COUNTS_PER_REV
-from retriever.bridge.drivers import CompositeDriver, build_real_driver
+from retriever.bridge.drivers import CompositeDriver, DDSM115Driver, build_real_driver
 from retriever.bridge.fake_driver import ARM_JOINTS, FakeTankDriver
 from retriever.bridge.server import HardwareDriver
 from retriever.navigation.geometry import TAU
@@ -262,9 +263,28 @@ class CompositeDriverTest(unittest.TestCase):
 
 
 class BuildRealDriverTest(unittest.TestCase):
-    def test_says_the_real_drivers_are_not_written_yet(self) -> None:
-        with self.assertRaisesRegex(NotImplementedError, "--driver fake"):
-            build_real_driver("/dev/ttyUSB0")
+    def test_builds_the_ddsm115_wheels_as_the_base(self) -> None:
+        log = Log()
+        with mock.patch("retriever.bridge.drivers.DDSM115Driver",
+                        return_value=FakeBase(log)) as wheels:
+            driver = build_real_driver("/dev/ttyUSB0")
+        self.assertEqual(wheels.call_args.args, ("/dev/ttyUSB0",))
+        driver.stop()
+        self.assertEqual(log, [("stop", "base")])
+
+
+class WheelsNeedTheirBusTest(unittest.TestCase):
+    """DDSM115Driver is real now (its tests: tests/test_ddsm115.py). With no
+    wheel bus it must refuse with directions, never half-start."""
+
+    def test_ddsm115_without_a_bus_refuses_with_directions(self) -> None:
+        port = "/dev/no-such-wheel-bus"
+        for build in (lambda: DDSM115Driver(port), lambda: build_real_driver(port)):
+            with self.assertRaises((ConnectionError, ImportError)) as ctx:
+                build()
+            # no pyserial: how to install it; with pyserial: which port failed
+            self.assertTrue("pi/setup.sh" in str(ctx.exception) or port in str(ctx.exception),
+                            str(ctx.exception))
 
 
 if __name__ == "__main__":
