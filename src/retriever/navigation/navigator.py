@@ -207,6 +207,13 @@ class FollowConfig:
     backoff_mps: float = 0.12
     max_backoffs: int = 4
     blocked_decay: float = 0.25       # how fast a good tick forgives a blocked one
+    lock_end_m: float = 1.2           # this close: stop re-snapping the destination
+    # Two ways round a chair are often within a few percent of each other, and
+    # scan noise flips which one wins twice a second. The robot then turns
+    # toward one, turns back toward the other and makes no ground. A new route
+    # has to be this much shorter before it is worth abandoning the committed
+    # one -- and it is taken anyway when the old one is gone or blocked.
+    switch_margin: float = 0.20       # 20% better, or keep going
     # Turning on the spot sweeps the corners -- and with an arm on the front,
     # that circle is much bigger than the body. The wheels blank four wedges of
     # the lidar's view, so the thing a corner is about to hit is often one the
@@ -272,6 +279,8 @@ class PathFollower:
         self._backoff_until: float | None = None
         self._backoff_wz = 0.0
         self._turning = False
+        self._end_locked: tuple[float, float] | None = None
+        self._end_goal: tuple[float, float] | None = None
         self._v_room: float | None = None
 
     # -- the route --------------------------------------------------------
@@ -279,9 +288,22 @@ class PathFollower:
     def _replan(self, p: Pose, goal: Pose, now: float) -> None:
         self._planned_at = now
         r = self.mapper.plan((p.x, p.y), (goal.x, goal.y))
+        if r.ok and self.path is not None and self._path_still_good(p):
+            keep = self._route_left(p)
+            if r.length_m > keep * (1.0 - self.config.switch_margin):
+                self._planned_at = now       # the committed route stands
+                return
         self.result = r
         if r.ok:
             self.path = r.path
+            # A goal the map calls lethal is snapped to the nearest free cell --
+            # redone on EVERY replan, twice a second, so each new scan slides
+            # the destination and the robot chases a point that keeps moving.
+            # Once it is close, fix the endpoint: later scans may change the
+            # ROUTE, never where it ends.
+            if (self._end_locked is None and r.goal is not None
+                    and math.hypot(goal.x - p.x, goal.y - p.y) <= self.config.lock_end_m):
+                self._end_locked = r.goal
         else:
             self.path = None
             self._why = r.reason
@@ -339,6 +361,44 @@ class PathFollower:
         return False
 
     # -- one tick ---------------------------------------------------------
+
+    def _past(self, p: Pose, end: tuple[float, float]) -> bool:
+        """Has it driven PAST the goal? Distance alone never notices: if the
+        robot overshoots (odometry under-reporting how far it has gone is
+        enough), the gap starts growing again and it chases a point behind
+        itself until something else stops it. Arriving is "close enough, OR the
+        goal is behind me and was close": project the goal onto the nose."""
+        if self.path is None or len(self.path) < 2:
+            return False
+        ax, ay = self.path[-2]
+        bx, by = self.path[-1]
+        hx, hy = bx - ax, by - ay                      # the last leg's direction
+        n = math.hypot(hx, hy)
+        if n < 1e-6:
+            return False
+        beyond = ((p.x - end[0]) * hx + (p.y - end[1]) * hy) / n
+        return beyond > 0.0 and math.hypot(end[0] - p.x, end[1] - p.y) <= 3.0 * self.limits.pos_tol
+
+    def _route_left(self, p: Pose) -> float:
+        """Metres still to drive on the route it is committed to."""
+        path = self.path or []
+        if len(path) < 2:
+            return math.inf
+        seg, along, _ = self._nearest(p)
+        total = -along
+        for a, b in zip(path[seg:], path[seg + 1:]):
+            total += math.dist(a, b)
+        return max(0.0, total)
+
+    def _path_still_good(self, p: Pose) -> bool:
+        """Is the committed route worth keeping? Only if the robot is still on
+        it and nothing has appeared across it."""
+        if self.path is None or len(self.path) < 2:
+            return False
+        seg, along, off = self._nearest(p)
+        if off > self.config.off_path_m:
+            return False
+        return not self._blocked_ahead(p, seg, along, self.mapper.costmap())
 
     def _start_backoff(self, p: Pose, cm: Costmap, now: float) -> bool:
         """Begin reversing out, if there is anywhere to reverse to and any tries
@@ -407,8 +467,14 @@ class PathFollower:
         self._last_t = now
         p = obs.base
 
-        end = self.result.goal if (self.result and self.result.ok and self.result.goal) else (goal.x, goal.y)
-        if math.hypot(end[0] - p.x, end[1] - p.y) <= lim.pos_tol:
+        if self._end_goal != (goal.x, goal.y):         # a new destination: start again
+            self._end_goal = (goal.x, goal.y)
+            self._end_locked = None
+        end = (self._end_locked
+               or (self.result.goal if (self.result and self.result.ok and self.result.goal)
+                   else (goal.x, goal.y)))
+        d_end = math.hypot(end[0] - p.x, end[1] - p.y)
+        if d_end <= lim.pos_tol or self._past(p, end):
             self.plan = FollowPlan("arrived", "")
             return Action(), True
 
