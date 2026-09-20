@@ -1,13 +1,10 @@
-# dataset tarballs staged for upload - large, regenerable from the board
-scripts/baseten/*.tar.gz
-__pycache__/
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
 .venv/
+__pycache__/
 .pytest_cache/
-.ruff_cache/
-
-# Teleop drive recordings
-data/drives/
+*.egg-info/
+.env
+.reference/
+artifacts/
+*.pcm
+*.wav
+weights/clip/ViT-B-32.pt

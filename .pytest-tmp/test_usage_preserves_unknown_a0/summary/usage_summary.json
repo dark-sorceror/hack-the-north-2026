@@ -1,0 +1,19 @@
+{
+  "calls": 2,
+  "groups": [
+    {
+      "model": "model",
+      "key_suffix": "...alue",
+      "purpose": "robot_realtime",
+      "calls": 2,
+      "failures": 0,
+      "input_tokens": 3,
+      "output_tokens": 4,
+      "total_tokens": 7,
+      "missing_input_tokens": 1,
+      "missing_output_tokens": 1,
+      "missing_total_tokens": 1
+    }
+  ],
+  "accounting": "One record per response.done; interrupted sessions may have unknown usage"
+}
