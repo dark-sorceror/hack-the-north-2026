@@ -3,11 +3,11 @@
 <title>Teleop</title>
 <style>
   :root { --ground:#E9EAEC; --surface:#FCFCFD; --ink:#14171C; --soft:#757C86; --rule:#CACDD3;
-          --hot:#B45C09; --bad:#A11B1B; --ok:#196B4A; --pt:#17395F; --trail:#6A3FA0; --key:#DDE0E5;
+          --hot:#B45C09; --bad:#A11B1B; --ok:#196B4A; --pt:#17395F; --trail:#6A3FA0; --route:#0E7C86; --key:#DDE0E5;
           --mono:ui-monospace,Menlo,monospace; }
   @media (prefers-color-scheme: dark) { :root { --ground:#15171B; --surface:#1C1F24; --ink:#E9EBEE;
           --soft:#79808B; --rule:#31373F; --hot:#F0A03C; --bad:#E8756A; --ok:#4FBF8B; --pt:#8FB4DC;
-          --trail:#C3A3EE; --key:#2A2F36; } }
+          --trail:#C3A3EE; --route:#4FD1C5; --key:#2A2F36; } }
   * { box-sizing:border-box; } html,body { height:100%; margin:0; }
   body { background:var(--ground); color:var(--ink); font-family:var(--mono); font-size:13px;
          display:grid; grid-template-rows:auto 1fr; overflow:hidden; }
@@ -234,6 +234,17 @@ $('resetbtn').onclick = () => post('/reset');
 // ---- the view: follows the robot, world x (start heading) points up
 const cv = $('cv'), cx = cv.getContext('2d');
 let view = null, autoErr = '';
+const SPAN_MIN = 3, SPAN_MAX = 24;
+let span = 8;                                        // metres across the short side
+try {
+  const saved = parseFloat(localStorage.getItem('retriever.span'));
+  if (isFinite(saved) && saved >= SPAN_MIN && saved <= SPAN_MAX) span = saved;
+} catch (e) { /* private window, blocked storage: the default is fine */ }
+function setSpan(next) {
+  span = Math.min(SPAN_MAX, Math.max(SPAN_MIN, next));
+  try { localStorage.setItem('retriever.span', String(span)); } catch (e) {}
+  draw();
+}
 let drawing = false, waypoints = [];
 // ---- the map: deflated bytes, one per 5 cm cell, decoded once per version
 let mapImg = null, mapMeta = null, mapBusy = false;
@@ -269,7 +280,10 @@ function draw() {
   cx.setTransform(dpr, 0, 0, dpr, 0, 0);
   cx.clearRect(0, 0, W, H);
   if (!snap) return;
-  const [rx, ry, th] = snap.pose, S = Math.min(W, H) / 6;          // 6 m across
+  // Metres across the short side. 6 was framed for a half-width window; on a
+  // full screen it crops the room just as a route leaves it. Scroll to change
+  // it -- the choice is remembered per browser.
+  const [rx, ry, th] = snap.pose, S = Math.min(W, H) / span;
   const sx = (x, y) => W / 2 - (y - ry) * S, sy = (x, y) => H / 2 - (x - rx) * S;
   view = {rx, ry, S, W, H};
   if (snap.map === null) { mapImg = null; mapMeta = null; }
@@ -299,18 +313,39 @@ function draw() {
     cx.moveTo(px, py); cx.lineTo(px - Math.sin(hth) * 20, py - Math.cos(hth) * 20); cx.stroke();
     cx.fillStyle = css('--ok'); cx.font = '600 11px ui-monospace,monospace'; cx.fillText('home', px + 14, py + 4);
   }
-  // robot footprint (front, rear, half width) and heading
-  const [fr, re, hw] = snap.footprint, c = Math.cos(th), s = Math.sin(th);
+  // Robot outline. `footprint` front INCLUDES the arm, so drawing one box made
+  // the robot look 20 cm longer than the chassis and put its edge where there
+  // was actually clear floor. The chassis is drawn solid at its real size, the
+  // claw as a narrow stub: both are real, and now they read as what they are.
+  const [fr, re, hw] = snap.footprint, claw = snap.claw_m || 0;
+  const body = fr - claw, c = Math.cos(th), s = Math.sin(th);
   const corner = (bx, by) => [sx(rx + bx * c - by * s, ry + bx * s + by * c), sy(rx + bx * c - by * s, ry + bx * s + by * c)];
-  cx.strokeStyle = css('--ink'); cx.lineWidth = 2; cx.beginPath();
-  [[fr, hw], [fr, -hw], [-re, -hw], [-re, hw], [fr, hw]].forEach(([a, b], i) => { const [px, py] = corner(a, b); i ? cx.lineTo(px, py) : cx.moveTo(px, py); });
-  cx.stroke();
-  const [nx, ny] = corner(fr + 0.12, 0), [ox, oy] = corner(0, 0);
+  const poly = (pts, dash) => {
+    cx.setLineDash(dash || []); cx.beginPath();
+    pts.forEach(([a, b], i) => { const [px, py] = corner(a, b); i ? cx.lineTo(px, py) : cx.moveTo(px, py); });
+    cx.stroke(); cx.setLineDash([]);
+  };
+  cx.strokeStyle = css('--ink'); cx.lineWidth = 2;
+  poly([[body, hw], [body, -hw], [-re, -hw], [-re, hw], [body, hw]]);
+  if (claw > 0.01) {                                  // what the arm adds, out front
+    const cw = Math.min(hw, 0.075);
+    cx.lineWidth = 1.5;
+    poly([[body, cw], [fr, cw], [fr, -cw], [body, -cw]], [4, 3]);
+  }
+  cx.lineWidth = 2;
+  const [nx, ny] = corner(body + 0.12, 0), [ox, oy] = corner(0, 0);
   cx.beginPath(); cx.moveTo(ox, oy); cx.lineTo(nx, ny); cx.stroke();
   if (snap.route && snap.route.length > 1) {          // the planned route
-    cx.strokeStyle = css('--trail'); cx.lineWidth = 3; cx.globalAlpha = 0.8; cx.beginPath();
+    // Teal and dashed: the route is what it MEANS to drive. The trail (purple)
+    // is where it has been. Drawing both in one colour made every weave in the
+    // trail look like the planner's choice.
+    cx.strokeStyle = css('--route'); cx.lineWidth = 3; cx.globalAlpha = 0.95;
+    cx.setLineDash([9, 5]); cx.beginPath();
     snap.route.forEach(([x, y], i) => i ? cx.lineTo(sx(x, y), sy(x, y)) : cx.moveTo(sx(x, y), sy(x, y)));
-    cx.stroke(); cx.globalAlpha = 1;
+    cx.stroke(); cx.setLineDash([]); cx.globalAlpha = 1;
+    const [gx, gy] = snap.route[snap.route.length - 1];   // and where it ends
+    cx.fillStyle = css('--route'); cx.beginPath();
+    cx.arc(sx(gx, gy), sy(gx, gy), 5, 0, Math.PI * 2); cx.fill();
   }
   if (drawing || waypoints.length) {                 // the path being drawn
     const pts = curveThrough([[rx, ry], ...waypoints]);
@@ -348,6 +383,11 @@ cv.addEventListener('click', async e => {
   command('/goto', {x, y, round_trip: e.shiftKey});
 });
 cv.addEventListener('contextmenu', e => { e.preventDefault(); post('/cancel'); });
+cv.addEventListener('wheel', e => {                  // scroll the map to zoom
+  e.preventDefault();
+  setSpan(span * (e.deltaY > 0 ? 1.1 : 1 / 1.1));
+}, {passive: false});
+
 // The camera streams straight from the Pi (scripts/cam_stream.py), not through
 // this page's server: an MJPEG <img> is its own connection, so a dead camera
 // costs the dashboard nothing.
