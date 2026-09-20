@@ -283,6 +283,25 @@ class TestFollower(unittest.TestCase):
         self.assertIsNotNone(ctl.failure)
         self.assertIn("way there", ctl.failure[0])
 
+    def test_a_carrot_just_inside_the_rotate_angle_still_moves(self):
+        """The stall found on the robot: alpha a hair under rotate_deg made the
+        alignment ramp zero, and wz = v * curvature made that zero too, so it
+        commanded 4 mm/s and no turn and sat there until the goal timed out."""
+        m, _ = self.mapper()
+        m.add_scan(Pose(), [(x, y) for x, y in room()])
+        cfg = FollowConfig()
+        ctl = PathFollower(m, Limits(v_max=0.3, w_max=1.0, pos_tol=0.08), cfg)
+        for off_deg in (cfg.rotate_deg - 0.1, cfg.rotate_deg - 2.0, cfg.rotate_deg - 8.0):
+            with self.subTest(off_deg=off_deg):
+                ctl.path = [(0.0, 0.0), (2.0, 0.0)]
+                pose = Pose(0.0, 0.0, math.radians(off_deg))   # nose off the route by ~55 deg
+                a, _ = ctl.step_observation(
+                    Observation(joints={}, base=pose, t=0.0), Pose(2.0, 0.0, 0.0))
+                turning = abs(a.base_wz) > 0.05           # it closes the angle...
+                driving = a.base_vx > cfg.creep_mps       # ...or it makes real progress
+                self.assertTrue(turning or driving,
+                                f"stalled at {off_deg:.1f} deg: vx={a.base_vx:.4f} wz={a.base_wz:.4f}")
+
     def test_waits_when_the_map_goes_stale(self):
         m, clock = self.mapper()
         m.add_scan(Pose(), [(x, y) for x, y in room()])
