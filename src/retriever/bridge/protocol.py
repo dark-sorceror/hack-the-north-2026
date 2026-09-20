@@ -155,6 +155,11 @@ class State:
     # laptop's odometry takes its heading from them instead of from the wheels,
     # which slide in every skid-steer turn. Left off the line without a gyro.
     yaw: float | None = None
+    # The Pi's own 5 V rail and the firmware's undervoltage flag (bridge/power.py).
+    # NOT the battery's charge: nothing on the robot can measure the pack. This is
+    # the rail that collapses when the pack sags, which is the failure worth seeing.
+    volts: float | None = None
+    undervoltage: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -386,6 +391,8 @@ _RULES: dict[type[Message], dict[str, _Check]] = {
         "nearest_m": _optional(_nonneg),
         "stop_m": _optional(_nonneg),
         "yaw": _optional(_number),
+        "volts": _optional(_nonneg),
+        "undervoltage": _optional(_boolean),
     },
     Scan: {
         "t": _number,
@@ -398,7 +405,7 @@ _RULES: dict[type[Message], dict[str, _Check]] = {
 # Fields left off the line when None, so a message without them is
 # byte-identical to what a v1 peer sends and expects.
 _OMIT_IF_NONE: dict[type[Message], tuple[str, ...]] = {
-    State: ("bubble", "bubble_reason", "nearest_m", "stop_m", "yaw"),
+    State: ("bubble", "bubble_reason", "nearest_m", "stop_m", "yaw", "volts", "undervoltage"),
 }
 _BY_TYPE: dict[str, type[Message]] = {cls.TYPE: cls for cls in _RULES}
 _REQUIRED: dict[type[Message], tuple[str, ...]] = {
