@@ -190,7 +190,10 @@ class PathTracker:
         left = self.length_m - s_here
         self.remaining_m = left
         end = self.path[-1]
-        if left <= lim.pos_tol and math.hypot(end[0] - p.x, end[1] - p.y) <= lim.pos_tol * 1.5:
+        d_end = math.hypot(end[0] - p.x, end[1] - p.y)
+        # There: within pos_tol of the end, or already past it and close (then
+        # stopping beats turning round for a few centimetres).
+        if d_end <= lim.pos_tol or (left <= 0.02 and d_end <= lim.pos_tol * 1.5):
             self.plan = TrackPlan("arrived", "")
             self._speed = 0.0
             return Action(), True

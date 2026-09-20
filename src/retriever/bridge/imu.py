@@ -18,13 +18,22 @@ does (src/hid/hid-device.cpp, hid-types.h; D400 FW >= 5.16 reports):
 
 HEADING. The robot turns about "up", whatever way the camera is mounted, and
 the accelerometer says where up is (at rest it measures the floor pushing up).
-So yaw rate = gyro . up, with the gyro's bias learned while the wheels are
-still. Integrated, that is a heading that doesn't care how much the tyres
-slide: the skid-steer's weak spot. It still drifts slowly (bias), which the
-wheels can't fix and the lidar map later can.
+So yaw rate = gyro . up. Integrated, that is a heading that doesn't care how
+much the tyres slide: the skid-steer's weak spot.
 
-Permissions: /dev/hidrawN is root-only by default. A udev rule for it (group
-plugdev) fixes that for good; for a quick test, `sudo chmod 666 /dev/hidraw0`.
+ZERO-VELOCITY UPDATES. A gyro's bias is its enemy: 0.1 deg/s of it is six
+degrees a minute. But the bridge knows when the wheels are stopped, and a
+stopped skid-steer is not turning. So once the wheels have been still for
+still_for_s, the heading HOLDS and the bias re-learns from what the gyro reads
+(only a fast turn, faster than hand_rate, counts as someone turning it by
+hand). Standstill drift is zero, and a bias that started wrong (the first
+readings after power-up are settling: skipped, but still) corrects itself
+within seconds of every stop. Measured on the robot before this: a bias
+learned in the first quarter second, off by 7.5 deg/s, that the old
+"only learn when it reads under 1.7 deg/s" rule then locked in forever.
+
+Permissions: /dev/hidrawN is root-only by default. pi/setup.sh installs a
+udev rule for it (group plugdev); for a quick test, `sudo chmod 666 /dev/hidraw0`.
 """
 
 from __future__ import annotations
@@ -97,9 +106,11 @@ def parse_report(buf: bytes) -> tuple[int, int, tuple[float, float, float]] | No
 
 @dataclass(frozen=True)
 class YawConfig:
-    still_rate: float = 0.03        # rad/s: slower than this with the wheels stopped = still
-    still_for_s: float = 0.4        # ...for this long before the bias starts learning
-    bias_tau_s: float = 4.0         # bias time constant while still
+    warmup_s: float = 0.5           # gyro readings this soon after the first are settling: skipped
+    init_s: float = 0.5             # then this long of plain averaging (wheels still) = first bias
+    still_for_s: float = 0.4        # wheels stopped this long: not turning (hold, learn the bias)
+    hand_rate: float = 0.35         # rad/s (20 deg/s): faster than this while stopped = turned by hand
+    bias_tau_s: float = 1.5         # bias time constant while stopped
     up_tau_s: float = 1.0           # gravity direction time constant
     max_dt_s: float = 0.05          # a gap longer than this is a dropout, not a turn
 
@@ -115,7 +126,10 @@ class YawTracker:
         self.bias = [0.0, 0.0, 0.0]             # rad/s, gyro frame
         self.up: list[float] | None = None      # unit vector, gyro/accel frame
         self.bias_ready = False
+        self.holding = False                    # a zero-velocity update is on: heading held
         self._bias_n = 0
+        self._first_t: float | None = None
+        self._init_from: float | None = None
         self._last_t: float | None = None
         self._still_since: float | None = None
         self.samples = 0
@@ -134,31 +148,55 @@ class YawTracker:
         self.up = [x / m for x in v]
 
     def gyro(self, w: tuple[float, float, float], t: float, wheels_still: bool = True) -> float:
-        """One gyro sample at time t (seconds). Returns the yaw."""
+        """One gyro sample at time t (seconds); wheels_still: the wheels are
+        commanded to zero. Returns the yaw."""
         c = self.config
         self.samples += 1
+        if self._first_t is None:
+            self._first_t = t
         dt = 0.0 if self._last_t is None else t - self._last_t
         self._last_t = t
         if not 0.0 < dt <= c.max_dt_s:
             dt = 0.0
-        unbiased = [w[i] - self.bias[i] for i in range(3)]
-        mag = math.sqrt(sum(x * x for x in unbiased))
-        if wheels_still and (mag < c.still_rate or not self.bias_ready):
-            if self._still_since is None:
-                self._still_since = t
-            if t - self._still_since >= c.still_for_s or not self.bias_ready:
-                # the first second: a plain average; after: a slow EMA
-                self._bias_n += 1
-                k = 1.0 / self._bias_n if self._bias_n < 200 else min(1.0, dt / c.bias_tau_s)
-                self.bias = [self.bias[i] + k * (w[i] - self.bias[i]) for i in range(3)]
-                if self._bias_n >= 100:
-                    self.bias_ready = True
-        else:
-            self._still_since = None
-        if self.up is None or not self.bias_ready:
+        if t - self._first_t < c.warmup_s:              # settling after power-up
             self.rate = 0.0
             return self.yaw
+
+        if wheels_still:
+            if self._still_since is None:
+                self._still_since = t
+        else:
+            self._still_since = None
+
+        if not self.bias_ready:
+            # the first bias: a plain average over init_s of stopped wheels
+            if not wheels_still:
+                self._bias_n, self._init_from = 0, None
+                self.rate = 0.0
+                return self.yaw
+            if self._init_from is None:
+                self._init_from = t
+            self._bias_n += 1
+            self.bias = [self.bias[i] + (w[i] - self.bias[i]) / self._bias_n for i in range(3)]
+            if t - self._init_from >= c.init_s and self._bias_n >= 20:
+                self.bias_ready = True
+            self.rate = 0.0
+            return self.yaw
+
         unbiased = [w[i] - self.bias[i] for i in range(3)]
+        mag = math.sqrt(sum(x * x for x in unbiased))
+        stopped = self._still_since is not None and t - self._still_since >= c.still_for_s
+        if stopped and mag < c.hand_rate:
+            # zero-velocity update: stopped wheels, so not turning. Hold, and learn.
+            self.holding = True
+            k = min(1.0, dt / c.bias_tau_s)
+            self.bias = [self.bias[i] + k * (w[i] - self.bias[i]) for i in range(3)]
+            self.rate = 0.0
+            return self.yaw
+        self.holding = False
+        if self.up is None:
+            self.rate = 0.0
+            return self.yaw
         self.rate = sum(unbiased[i] * self.up[i] for i in range(3))
         self.yaw += self.rate * dt
         return self.yaw
@@ -201,7 +239,7 @@ class D435iImu:
             self._fd = os.open(path, os.O_RDWR)
         except PermissionError:
             raise PermissionError(
-                f"can't open {path}: it needs a udev rule (group plugdev), or for now "
+                f"can't open {path}: run pi/setup.sh (installs the udev rule), or for now "
                 f"`sudo chmod 666 {path}`") from None
         self._feature(REPORT_ACCEL, POWER_ON, self.accel_hz)
         self._feature(REPORT_GYRO, POWER_ON, self.gyro_hz)
@@ -269,6 +307,7 @@ class D435iImu:
         with self._lock:
             t = self.tracker
             return {"ready": t.ready, "yaw": t.yaw, "rate": t.rate, "bias": list(t.bias),
+                    "holding": t.holding,
                     "up": t.up, "counts": dict(self.counts), "report_size": self.report_size,
                     "error": self.error}
 

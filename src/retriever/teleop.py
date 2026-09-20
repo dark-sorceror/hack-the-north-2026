@@ -209,6 +209,8 @@ FACE_MIN_WZ = 0.25       # rad/s: slower than this and a skid-steer just sits th
 MAX_GOAL_M = 15.0        # a click further than this is a mis-click
 VIEWER_GRACE_S = 1.0     # page closed this long -> click-to-go stops
 PICKUP_WAIT_S = 2.0      # a round trip waits this long at the far end
+REVERSE_MAX_M = 1.5      # a click this close BEHIND the robot: back up to it, no spin
+BEHIND_RAD = math.radians(100)   # "behind": the spot is more than this off the nose
 
 
 @dataclass
@@ -221,6 +223,22 @@ class _Leg:
     label: str                # "there" | "home" | "path" | "back"
     path: list[tuple[float, float]] | None = None
     reverse: bool = False
+    # A straight line to `goal`, built when the leg starts (from wherever the
+    # robot is then): "rev" backs up it, "auto" picks forward or reverse by
+    # the least turning (including the final turn, if `face`).
+    straight: str | None = None
+
+
+def least_turning_is_reverse(pose: Pose, goal: Pose, face: bool) -> bool:
+    """Does backing up to `goal` need less turning than driving at it nose
+    first (counting the turn to goal.theta at the end, if `face`)? The robot
+    has an arm at the front, so only moves that don't end AT something use
+    this; ties go forward."""
+    bearing = math.atan2(goal.y - pose.y, goal.x - pose.x)
+    turn = lambda a, b: abs(math.remainder(a - b, math.tau))   # noqa: E731
+    fwd = turn(bearing, pose.theta) + (turn(goal.theta, bearing) if face else 0.0)
+    rev = turn(bearing + math.pi, pose.theta) + (turn(goal.theta, bearing + math.pi) if face else 0.0)
+    return rev < fwd - 0.1
 
 
 @dataclass
@@ -377,10 +395,18 @@ class TeleopSession:
             d = math.hypot(gx - pose.x, gy - pose.y)
             if d > MAX_GOAL_M:
                 raise RuntimeError(f"that's {d:.0f} m away; click closer than {MAX_GOAL_M:.0f} m")
-            # Heading = the way it will be going: arriving needs no final turn.
-            legs = [_Leg(Pose(gx, gy, math.atan2(gy - pose.y, gx - pose.x)), False, "there")]
+            bearing = math.atan2(gy - pose.y, gx - pose.x)
+            behind = abs(math.remainder(bearing - pose.theta, math.tau)) > BEHIND_RAD
+            if not round_trip and behind and d <= REVERSE_MAX_M:
+                # a short hop to a spot behind: back up to it, no spin (nothing to face)
+                legs = [_Leg(Pose(gx, gy, pose.theta), False, "there", straight="rev")]
+            else:
+                # nose first: an object is picked up with the arm, at the front.
+                # Heading = the way it will be going: arriving needs no final turn.
+                legs = [_Leg(Pose(gx, gy, bearing), False, "there")]
             if round_trip:
-                legs.append(_Leg(self.home, True, "home"))
+                # back the way it came, whichever way round turns least (usually reversing)
+                legs.append(_Leg(self.home, True, "home", straight="auto"))
             self._start_trip(legs, wait_s if round_trip else 0.0)
 
     def follow_path(self, points: list[Any], come_back: bool = False,
@@ -414,9 +440,10 @@ class TeleopSession:
             self._start_trip(legs, wait_s if come_back else 0.0)
 
     def go_home(self) -> None:
-        """Drive back to home and turn to face the way it faced there."""
+        """Drive back to home and turn to face the way it faced there: forwards
+        or backwards, whichever needs less turning in all."""
         with self._lock:
-            self._start_trip([_Leg(self.home, True, "home")], 0.0)
+            self._start_trip([_Leg(self.home, True, "home", straight="auto")], 0.0)
 
     def set_home(self) -> None:
         """Home is here, facing this way (it starts where teleop connected)."""
@@ -489,7 +516,19 @@ class TeleopSession:
         lidar = (getattr(robot, "scan", None) is not None
                  or getattr(robot, "bubble", None) is not None)
         leg = a.legs[0]
-        if leg.path is not None:                    # a drawn curve: follow it as drawn
+        if leg.straight is not None:
+            here = (pose.x, pose.y)
+            leg.reverse = (leg.straight == "rev" or
+                           (leg.straight == "auto" and least_turning_is_reverse(pose, leg.goal, leg.face)))
+            leg.path = [here, (leg.goal.x, leg.goal.y)]
+            if (math.dist(here, leg.path[1]) > 0.05 and lidar and self.mapper is not None
+                    and self.mapper.scans and not self._line_is_clear(here, leg.path[1])):
+                leg.path, leg.reverse = None, False  # something in the way: the planner, nose first
+        if leg.path is not None and math.dist(leg.path[0], leg.path[-1]) <= 0.05:
+            leg.path = None                         # already there: straight to the final turn
+            a.ctl = DifferentialGotoController(limits)
+            d = 0.0
+        elif leg.path is not None:                    # a curve or a straight line: follow it
             a.ctl = PathTracker(leg.path, limits, reverse=leg.reverse)
             d = path_length(leg.path)
         elif lidar and self.mapper is not None and self.mapper.scans:
@@ -572,6 +611,15 @@ class TeleopSession:
         if done:
             return self._leg_arrived(a, now, p)
         return action.base_vx, action.base_wz
+
+    def _line_is_clear(self, a: tuple[float, float], b: tuple[float, float]) -> bool:
+        """No lethal cell of the map on the straight line a -> b."""
+        from retriever.navigation.pathplan import _segment_cost
+
+        try:
+            return math.isfinite(_segment_cost(self.mapper.costmap(), a, b))
+        except Exception:
+            return False
 
     def _leg_arrived(self, a: _Auto, now: float, p: Pose) -> tuple[float, float] | None:
         """In position. Turn to face if the leg asks, else the leg is done."""
@@ -827,6 +875,7 @@ class TeleopSession:
                 "status": "driving" if a is not None else self.auto_status,
                 "detail": self.auto_detail,
                 "leg": None if a is None else a.legs[0].label,
+                "reverse": bool(a is not None and a.legs[0].reverse),
                 "phase": None if a is None else a.phase,
                 "then_home": bool(a is not None and len(a.legs) > 1),
                 "goal": None if a is None else [round(a.goal.x, 3), round(a.goal.y, 3)],
@@ -839,6 +888,13 @@ class TeleopSession:
         hello = getattr(robot, "hello", None) if robot is not None else None
         snap["scrub"] = {"used": None if odo is None else odo.geo.scrub_factor,
                          "pi": None if hello is None else hello.scrub_factor}
+        gyro_turn = getattr(odo, "turn_gyro_rad", 0.0) if odo is not None else 0.0
+        snap["heading"] = {
+            "source": getattr(odo, "heading_source", "wheels") if odo is not None else None,
+            # how much more the wheels claim to turn than the gyro saw: the slip
+            "slip_pct": (round(100.0 * (odo.turn_wheels_rad / gyro_turn - 1.0), 1)
+                         if gyro_turn > math.radians(90) else None),
+        }
         snap["estop"] = bool(robot is not None and robot.estopped)
         snap["watchdog"] = bool(robot is not None and robot.watchdog_tripped)
         bubble = getattr(robot, "bubble", None) if robot is not None else None

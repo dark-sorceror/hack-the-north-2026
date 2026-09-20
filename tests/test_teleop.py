@@ -366,6 +366,69 @@ class TestHome(BridgeCase):
         self.assertLess(math.hypot(snap["pose"][0] - home[0], snap["pose"][1] - home[1]), 0.1)
         self.assertLess(abs(math.remainder(snap["pose"][2] - home[2], math.tau)), math.radians(5))
 
+    def watch(self, s, timeout=30.0):
+        """Run the trip to the end; (min commanded vx, snapshot)."""
+        lo, deadline = 0.0, time.monotonic() + timeout
+        while s.auto is not None and time.monotonic() < deadline:
+            lo = min(lo, s.snapshot()["cmd"][0])
+            time.sleep(0.03)
+        return lo, s.snapshot()
+
+    def test_a_hop_behind_backs_up_without_spinning(self):
+        s = self.session()
+        s.core.gear = 2
+        s.goto(-0.8, 0.1)
+        lo, snap = self.watch(s)
+        self.assertEqual(snap["auto"]["status"], "arrived", snap["auto"])
+        self.assertLess(lo, -0.05)                               # it reversed
+        self.assertLess(abs(math.degrees(math.remainder(snap["pose"][2], math.tau))), 20)
+        self.assertLess(math.hypot(snap["pose"][0] + 0.8, snap["pose"][1] - 0.1), 0.12)
+
+    def test_a_far_spot_behind_turns_round_nose_first(self):
+        s = self.session()
+        s.core.gear = 2
+        s.goto(-2.0, 0.0)
+        lo, snap = self.watch(s, 40.0)
+        self.assertEqual(snap["auto"]["status"], "arrived", snap["auto"])
+        self.assertGreater(abs(math.degrees(math.remainder(snap["pose"][2], math.tau))), 150)
+
+    def test_round_trip_goes_nose_first_and_backs_home(self):
+        s = self.session()
+        s.core.gear = 2
+        s.goto(0.8, 0.3, round_trip=True, wait_s=0.3)
+        reversed_home = False
+        deadline = time.monotonic() + 40.0
+        while s.auto is not None and time.monotonic() < deadline:
+            snap = s.snapshot()
+            if snap["auto"]["leg"] == "home" and snap["cmd"][0] < -0.05:
+                reversed_home = True
+            time.sleep(0.03)
+        snap = s.snapshot()
+        self.assertTrue(reversed_home)
+        self.assertEqual(snap["auto"]["status"], "home", snap["auto"])
+        self.assertLess(math.hypot(snap["pose"][0], snap["pose"][1]), 0.12)
+        self.assertLess(abs(math.degrees(math.remainder(snap["pose"][2], math.tau))), 5)
+
+    def test_go_home_backs_up_when_that_turns_least(self):
+        s = self.session()
+        s.core.gear = 2
+        s.goto(0.8, 0.0)
+        self.watch(s)
+        s.go_home()
+        lo, snap = self.watch(s)
+        self.assertEqual(snap["auto"]["status"], "home", snap["auto"])
+        self.assertLess(lo, -0.05)
+        self.assertLess(abs(math.degrees(math.remainder(snap["pose"][2], math.tau))), 5)
+
+    def test_least_turning(self):
+        from retriever.teleop import least_turning_is_reverse
+        from retriever.types import Pose as P
+
+        facing_away = P(1.0, 0.0, 0.0)                           # home behind, facing on
+        self.assertTrue(least_turning_is_reverse(facing_away, P(0, 0, 0), face=True))
+        facing_home = P(1.0, 0.0, math.pi)
+        self.assertFalse(least_turning_is_reverse(facing_home, P(0, 0, math.pi), face=True))
+
     def test_a_key_cancels_a_round_trip(self):
         s = self.session()
         s.goto(1.0, 0.0, round_trip=True)

@@ -90,6 +90,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="metres. The default is a placeholder: MEASURE the tyre (diameter/2)")
     parser.add_argument("--track-width", type=float, default=defaults.track_width_m)
     parser.add_argument("--scrub-factor", type=float, default=defaults.scrub_factor)
+    parser.add_argument("--imu", choices=("auto", "d435i", "none"), default="auto",
+                        help="gyro heading for the laptop's odometry: the D435i's IMU over raw "
+                             "HID (auto: when the camera is plugged in; d435i: required)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     # Lidar safety bubble: all off unless --lidar-port or --fake-lidar is given.
     add_lidar_args(parser)
@@ -145,10 +148,26 @@ def main(argv: list[str] | None = None) -> int:
                 "normally-open" if args.estop_normally_open else "normally-closed", pressed)
 
     lidar = None
+    imu = None
     try:
         geo = TankGeometry(args.wheel_radius, args.track_width, args.scrub_factor)
         driver = build_driver(args, geo, relay)
         lidar, bubble = lidar_from_args(args, driver)   # (None, None) unless asked for
+        # The D435i's gyro: heading that ignores the skid-steer's wheel slip (bridge/imu.py).
+        if args.imu != "none":
+            from retriever.bridge.imu import D435iImu, find_hidraw
+
+            try:
+                if args.imu == "d435i" or find_hidraw() is not None:
+                    imu = D435iImu().start()
+                    logger.info("gyro: D435i IMU on %s (heading for the laptop's odometry)",
+                                imu.path)
+            except Exception as exc:  # no camera, no permission: the wheels still do heading
+                if args.imu == "d435i":
+                    print(f"\n  {exc}\n", file=sys.stderr)
+                    _close(lidar, relay, button)
+                    return 2
+                logger.warning("gyro: not used (%s)", exc)
         server = BridgeServer(
             driver,
             args.host,
@@ -162,11 +181,12 @@ def main(argv: list[str] | None = None) -> int:
             lidar=lidar,
             bubble=bubble,
             scan_hz=args.scan_hz,
+            imu=imu,
         )
     except (ConnectionError, FileNotFoundError, ImportError, NotImplementedError,
             RuntimeError, ValueError) as exc:
         print(f"fake_pi: {exc}", file=sys.stderr)
-        _close(lidar, relay, button)
+        _close(lidar, imu, relay, button)
         return 2
     settings = (
         f"{args.driver} driver, watchdog {args.timeout_ms:g} ms, "
@@ -180,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         # server.close() already ran driver.stop(); close() also frees the wheel port
-        _close(driver if hasattr(driver, "close") else None, relay, button)
+        _close(driver if hasattr(driver, "close") else None, relay, button, imu)
     return 0
 
 

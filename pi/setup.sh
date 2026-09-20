@@ -64,7 +64,7 @@ fi
 # a missing group in the unit's SupplementaryGroups makes systemd refuse to
 # start the service at all (status 216/GROUP), which is a bad way to find out.
 GROUPS_OK=""
-for g in dialout gpio; do
+for g in dialout gpio plugdev; do
   if getent group "$g" > /dev/null; then
     sudo usermod -aG "$g" "$USER" || true
     GROUPS_OK="$GROUPS_OK $g"
@@ -73,6 +73,11 @@ for g in dialout gpio; do
   fi
 done
 GROUPS_OK="${GROUPS_OK# }"
+
+# The D435i's gyro (/dev/hidrawN) for the group plugdev, instead of root only.
+sudo install -m 0644 "$HERE/pi/99-retriever-d435i.rules" /etc/udev/rules.d/99-retriever-d435i.rules
+sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=hidraw || true
 
 python3 -c "import sys; assert sys.version_info >= (3, 10), sys.version; print('python', sys.version.split()[0])"
 python3 -S -c "import sys; sys.path.insert(0, '$HERE/src'); import retriever.bridge.server; print('bridge imports with stdlib only: ok')"
