@@ -1,6 +1,3 @@
-# dataset tarballs staged for upload - large, regenerable from the board
-scripts/baseten/*.tar.gz
-
 # Python
 __pycache__/
 *.py[cod]
@@ -20,8 +17,13 @@ weights/clip/ViT-B-32.pt
 # Teleop drive recordings
 data/drives/
 
-# Local and generated
+# secrets and local config
 .env
+
+# dataset tarballs staged for upload - large, regenerable from the board
+SO-101/scripts/baseten/*.tar.gz
+
+# local scratch and generated artifacts
 .reference/
 artifacts/
 *.pcm
