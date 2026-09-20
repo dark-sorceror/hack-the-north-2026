@@ -53,11 +53,17 @@ MOTORS = {
 }
 
 
-def connect() -> HiwonderMotorsBus:
+def connect(include_gripper: bool = True) -> HiwonderMotorsBus:
     if not CAL.exists():
         sys.exit(f"no calibration at {CAL}")
     cal = {k: MotorCalibration(**v) for k, v in json.loads(CAL.read_text()).items()}
-    bus = HiwonderMotorsBus(port=PORT, motors=MOTORS, calibration=cal)
+    # When the gripper is under power lock holding an object we must not talk
+    # to it at all -- the connect handshake requires every declared motor to
+    # answer, and a latched/held gripper will not.
+    motors = dict(MOTORS) if include_gripper else {k: v for k, v in MOTORS.items() if k != GRIPPER}
+    if not include_gripper:
+        cal = {k: v for k, v in cal.items() if k != GRIPPER}
+    bus = HiwonderMotorsBus(port=PORT, motors=motors, calibration=cal)
     bus.connect()
     if not bus.is_calibrated:
         bus.disconnect()
@@ -128,7 +134,7 @@ def cmd_goto(args) -> None:
     poses = load_poses()
     if args.name not in poses:
         sys.exit(f"unknown pose '{args.name}'. known: {sorted(poses) or 'none'}")
-    bus = connect()
+    bus = connect(include_gripper=not args.hold_gripper)
     try:
         for m in bus.motors:
             bus.write("Operating_Mode", m, OperatingMode.POSITION.value)
@@ -149,7 +155,7 @@ def cmd_seq(args) -> None:
     missing = [n for n in args.names if n not in poses]
     if missing:
         sys.exit(f"unknown poses: {missing}. known: {sorted(poses)}")
-    bus = connect()
+    bus = connect(include_gripper=not args.hold_gripper)
     try:
         for m in bus.motors:
             bus.write("Operating_Mode", m, OperatingMode.POSITION.value)

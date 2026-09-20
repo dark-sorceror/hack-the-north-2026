@@ -1,0 +1,10 @@
+{
+  "handoff": {
+    "elbow_flex": -79.6,
+    "gripper": 11.03,
+    "shoulder_lift": -5.36,
+    "shoulder_pan": 4.13,
+    "wrist_flex": -1.1,
+    "wrist_roll": 11.3
+  }
+}
