@@ -59,6 +59,16 @@ class FakeRobot:
         """Label of the object in the gripper, or None."""
         return self._holding
 
+    @property
+    def objects(self) -> dict[str, Pose]:
+        """Where the fake world's objects are now, as a snapshot.
+
+        A simulated detector reads this to decide what the robot can see, and it changes
+        as things are picked up and put down, so it is read fresh every tick. A copy, so
+        nothing outside can move an object without going through the robot.
+        """
+        return dict(self._objects)
+
     def observe(self) -> Observation:
         """Snapshot the robot; each call shows the next camera frame, cycling."""
         frame = None
