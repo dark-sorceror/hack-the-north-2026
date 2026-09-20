@@ -95,6 +95,10 @@ def main() -> int:
                     help="plan with the circumscribed radius (clear at every heading, so it "
                          "can always turn on the spot) instead of the body half width: "
                          "safer, but it refuses gaps the robot actually fits through")
+    ap.add_argument("--arm", default=None, metavar="USER@HOST",
+                    help="the arm board, e.g. sunrise@10.0.0.112; enables the G key")
+    ap.add_argument("--arm-python", default="~/hiwonder-SoArm-101/.venv/bin/python",
+                    help="the interpreter on the arm board that has lerobot")
     ap.add_argument("--no-open", action="store_true", help="don't open a browser tab")
     args = ap.parse_args()
 
@@ -145,6 +149,10 @@ def main() -> int:
                             clearance_m=args.clearance,
                             camera_url=camera_url, claw_m=args.claw,
                             map_min_range_m=args.map_min_range).start()
+    if args.arm:
+        from retriever.teleop import ArmRunner
+        session.arm = ArmRunner(args.arm, python=args.arm_python)
+        print(f"  arm: {args.arm}  (press G on the page to grab)")
     try:
         httpd = serve(session, args.listen, args.port)
     except OSError as exc:

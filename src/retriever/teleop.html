@@ -82,6 +82,8 @@
       <b>shift-click</b> to go there and come back.
       <span class="k">Right-click, space or any drive key cancels.</span></div>
     <div class="row">
+      <button class="act" id="pickbtn">&#9995; grab it (G)</button>
+      <button class="act" id="handoffbtn">&#129309; hand it over (B)</button>
       <button class="act" id="homebtn">&#8962; go home (H)</button>
       <button class="act" id="sethomebtn">set home here</button>
     </div>
@@ -151,6 +153,8 @@ addEventListener('keydown', e => {
   else if (e.code === 'Escape') { held.clear(); post('/estop'); paintPad(); }
   else if (e.code === 'KeyR') { post('/reset'); }
   else if (e.code === 'KeyH') { goHome(); }
+  else if (e.code === 'KeyG') { e.preventDefault(); pick(); }
+  else if (e.code === 'KeyB') { e.preventDefault(); handoff(); }
   else if (drawing && e.code === 'Backspace') { e.preventDefault(); waypoints.pop(); draw(); }
   else if (drawing && e.code === 'Enter') { e.preventDefault(); sendPath(false); }
   else if (/^Digit[1-9]$/.test(e.code)) { setGear(+e.code.slice(5) - 1); }
@@ -406,6 +410,43 @@ function showCamera(url) {
   img.src = url;
 }
 
+function pick() {
+  // The manual backup for the arm. Space is HALT and must stay HALT, so this is G.
+  const b = $('pickbtn');
+  if (b && b.dataset.busy === '1') return;
+  post('/pick');
+}
+function handoff() {
+  const b = $('handoffbtn');
+  if (b && b.dataset.busy === '1') return;
+  post('/handoff');
+}
+if ($('pickbtn')) $('pickbtn').onclick = pick;
+if ($('handoffbtn')) $('handoffbtn').onclick = handoff;
+
+function paintArm(a) {
+  // One busy flag covers both buttons: the arm has one serial port, so a pick and
+  // a handoff can never run at once, and showing otherwise would invite a click
+  // that the server is only going to refuse.
+  const p = $('pickbtn'), h = $('handoffbtn');
+  if (!p || !h) return;
+  if (!a || !a.configured) {
+    p.textContent = '\u270B no arm configured'; p.disabled = true;
+    h.textContent = '\u1F91D no arm configured'; h.disabled = true;
+    return;
+  }
+  const busy = !!a.busy;
+  p.disabled = busy; h.disabled = busy;
+  p.dataset.busy = h.dataset.busy = busy ? '1' : '0';
+  if (busy) {
+    p.textContent = '\u270B ' + (a.detail || 'working...');
+    h.textContent = '\u1F91D ' + (a.detail || 'working...');
+  } else {
+    p.textContent = '\u270B grab it (G)' + (a.detail ? ' \u2014 ' + a.detail : '');
+    h.textContent = '\u1F91D hand it over (B)';
+  }
+}
+
 function fmt(n, d = 2) { return (n >= 0 ? ' ' : '') + n.toFixed(d); }
 function paint() {
   const s = snap;
@@ -418,6 +459,7 @@ function paint() {
   if (s.estop) f.push('<span class="badge estop">E-STOP LATCHED</span>');
   if (s.watchdog && s.link === 'up') f.push('<span class="badge down">watchdog tripped</span>');
   $('flags').innerHTML = f.join(' ');
+  paintArm(s.arm);
   $('rec').textContent = s.recording ? `● recording ${s.recording.lines} lines → ${s.recording.path}` : '';
   $('cmd').textContent = `${fmt(s.cmd[0])} m/s ${fmt(s.cmd[1])} rad/s`;
   $('meas').textContent = `${fmt(s.meas[0])} m/s ${fmt(s.meas[1])} rad/s`;

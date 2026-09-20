@@ -42,6 +42,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterator, Protocol
 
 LOG = logging.getLogger("central")
@@ -54,11 +55,29 @@ _STOP_RE = re.compile(r"\b(" + "|".join(re.escape(w) for w in STOP_WORDS) + r")\
 # How far short of the object to stop. The claw already reaches ~0.20 m past the
 # chassis, and the bubble stops the robot before that touches anything, so this
 # is reach plus a margin -- not a guess at where the object is.
-DEFAULT_STANDOFF_M = 0.35
+DEFAULT_STANDOFF_M = 0.20
+
+# How far short of the object to stop. Measured against what the arm can actually
+# reach, not guessed: the claw extends ~0.20 m past the chassis, and arrival is
+# good to about 0.15 m, so 0.35 m left the goose out of reach on a bad arrival.
+# Erring CLOSE beats erring far -- the safety bubble refuses anything it could not
+# stop from, and the arm re-detects from where the robot actually stopped, so a
+# little too close is recoverable and a little too far is not.
 
 # A detection older than this is refused by the Mac rather than placed wrong
 # (it keeps ~2 s of pose history). Give up before it does, with a better message.
 MAX_DETECTION_AGE_S = 1.5
+
+# How close the object must be before the arm is worth firing. The claw reaches
+# about 0.20 m past the chassis; beyond this the policy is being asked to grasp
+# something it cannot touch, and it will fail in a way that looks like a bad
+# policy rather than a bad approach.
+ARM_REACH_M = 0.30
+
+# A nudge is a re-approach, not a new mission: stop closer and do not re-plan a
+# route for what should be a few centimetres.
+NUDGE_STANDOFF_M = 0.12
+MAX_NUDGES = 2
 
 
 def is_stop(text: str) -> bool:
@@ -307,9 +326,46 @@ def run_once(heard: Heard, *, voice: Voice, detector: Detector, nav: Nav, arm: A
         say("I couldn't get there.")
         return False
 
-    # 5. The arm closes the loop on its OWN view. The coordinates that sent the
-    #    robot here are stale by construction: odometry drifts, arrival is only
-    #    good to about 0.15 m, and the camera at the end is the truth.
+    # 5. LOOK AGAIN BEFORE GRABBING. This is the seam that quietly ruins a fetch.
+    #    The fix that sent the robot here was taken from where it USED TO BE, and
+    #    by now it is wrong in three ways at once: arrival is only good to about
+    #    0.15 m, odometry drifted over the drive, and the object may have been
+    #    nudged. Firing the arm on it means grasping at a remembered position.
+    #    The camera at the end is the truth, so re-detect and close the gap.
+    for attempt in range(MAX_NUDGES + 1):
+        again = detector.locate(target)
+        if again is None:
+            if attempt == 0:
+                # Seen on the way in, not seen on arrival: almost always means the
+                # robot is now too close and it has gone under the camera's view.
+                # Let the arm look for it rather than giving up on the mission.
+                say("I'm here. Let me try to pick it up.")
+                break
+            say(f"I've lost sight of the {target}.")
+            nav.halt()
+            return False
+
+        reach = math.hypot(again.x, again.y)
+        LOG.info("re-detected %s at x=%.2f y=%.2f (%.2f m out)", target, again.x, again.y, reach)
+        if reach <= ARM_REACH_M:
+            break
+        if attempt == MAX_NUDGES:
+            say(f"I can see the {target} but I can't get close enough.")
+            nav.halt()
+            return False
+
+        say("Just a little closer.")
+        try:
+            nav.approach(again, standoff_m=NUDGE_STANDOFF_M)
+            for auto in nav.watch(timeout_s=25.0):
+                pass
+        except NavError as exc:
+            say(str(exc))
+            nav.halt()
+            return False
+
+    # The arm now closes the loop on its own wrist camera, from a pose where the
+    # object is genuinely within reach.
     ok, detail = arm.pick()
     say(detail)
     if not ok:
@@ -384,11 +440,21 @@ def main(argv: list[str] | None = None) -> int:
                     help="the Mac's teleop API (host:port)")
     ap.add_argument("--arm", default=None,
                     help="the S100 over ssh, e.g. sunrise@10.0.0.112; omit to skip the arm")
+    ap.add_argument("--arm-python", default="~/hiwonder-SoArm-101/.venv/bin/python",
+                    help="the interpreter on the arm board that has lerobot")
     ap.add_argument("--target", default="goose", help="what to fetch")
     ap.add_argument("--standoff", type=float, default=DEFAULT_STANDOFF_M,
                     help="stop this far short of it, metres")
     ap.add_argument("--fake-detect", metavar="X,Y",
                     help="skip the camera; pretend the object is at robot-frame X,Y")
+    ap.add_argument("--detect-stream", metavar="HOST[:PORT]",
+                    help="the real detector: the robot-camera stream on :5577")
+    ap.add_argument("--mount", metavar="H,FWD,PITCH_DEG", default="0.20,0.15,0",
+                    help="MEASURED camera mount, not guessed")
+    ap.add_argument("--right", type=float, default=0.08,
+                    help="metres the lens sits right of the robot centreline")
+    ap.add_argument("--weights", default="yolov8s-worldv2.pt",
+                    help="an open-vocabulary -world checkpoint finds a goose by name")
     ap.add_argument("--once", metavar="TEXT",
                     help="run one mission with this as the spoken text, then exit")
     ap.add_argument("--dry-run", action="store_true",
@@ -408,6 +474,17 @@ def main(argv: list[str] | None = None) -> int:
             detector = FixedDetector(float(xs), float(ys))
         except ValueError:
             ap.error("--fake-detect wants X,Y in metres, e.g. 1.6,0.2")
+    elif args.detect_stream:
+        # The real detector. Imported lazily, so the dry run and the fake path stay
+        # free of torch and start instantly.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from floor_detector import DepthStreamFrames, FloorDetector, parse_mount
+        _h, _, _p = args.detect_stream.partition(":")
+        detector = FloorDetector(DepthStreamFrames(_h, int(_p or 5577)),
+                                 parse_mount(args.mount), weights=args.weights,
+                                 right_m=args.right, conf=0.05)
+        LOG.info("letting the camera stream settle")
+        time.sleep(5)
     elif args.dry_run:
         detector = FixedDetector(1.5, 0.0)
     else:
@@ -429,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         arm = Arm(None)
     else:
         nav = Nav(args.nav)
-        arm = Arm(args.arm)
+        arm = Arm(args.arm, python=args.arm_python)
 
     try:
         while True:

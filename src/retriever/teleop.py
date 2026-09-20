@@ -334,6 +334,7 @@ class TeleopSession:
         self.camera_url = camera_url      # an MJPEG stream for the page (cam_stream.py)
         # How much of footprint[0] is arm rather than chassis. Drawing only.
         self.claw_m = float(claw_m)
+        self.arm: Any = None       # set by scripts/teleop.py when --arm is given
         # Returns this close to the lidar never reach the MAP. Brackets, the arm
         # and cable runs sit just outside the chassis and come back in nearly
         # every scan; mapped, they become a wall that rides along with the robot
@@ -1041,6 +1042,7 @@ class TeleopSession:
         }
         snap["camera_url"] = self.camera_url
         snap["claw_m"] = self.claw_m
+        snap["arm"] = self.arm.state() if self.arm is not None else {"configured": False}
         snap["estop"] = bool(robot is not None and robot.estopped)
         snap["watchdog"] = bool(robot is not None and robot.watchdog_tripped)
         bubble = getattr(robot, "bubble", None) if robot is not None else None
@@ -1137,6 +1139,14 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                     session.calib_cancel()
                 elif self.path == "/cancel":
                     session.cancel()
+                elif self.path == "/pick":
+                    if session.arm is None:
+                        raise RuntimeError("no arm configured; restart teleop with --arm")
+                    extra = session.arm.pick()
+                elif self.path == "/handoff":
+                    if session.arm is None:
+                        raise RuntimeError("no arm configured; restart teleop with --arm")
+                    extra = session.arm.handoff()
                 else:
                     self._reply(404, b'{"error":"no such command"}')
                     return
@@ -1181,6 +1191,89 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                 self._reply(404, b'{"error":"not found"}')
 
     return Handler
+
+
+
+class ArmRunner:
+    """Fires the arm's grasp over SSH, off the HTTP thread.
+
+    THE MANUAL BACKUP. When voice or detection is having a bad day, a person can
+    still drive with the keys and press G. That path shares nothing with the
+    autonomous one except the board itself, so a failure upstream cannot take it
+    out.
+
+    The grasp takes 30-45 s, so the request must not wait for it: the page would
+    freeze, and a frozen page cannot send the stop that a moving arm might need.
+    It runs in a thread and reports through `state()`, which the page already
+    polls.
+    """
+
+    def __init__(self, target: str | None, python: str = "~/hiwonder-SoArm-101/.venv/bin/python",
+                 timeout_s: float = 90.0) -> None:
+        self.target, self.python, self.timeout_s = target, python, timeout_s
+        self._lock = threading.Lock()
+        self._busy = False
+        self._detail = ""
+
+    def state(self) -> dict[str, Any]:
+        with self._lock:
+            return {"configured": self.target is not None,
+                    "busy": self._busy, "detail": self._detail}
+
+    def pick(self) -> dict[str, Any]:
+        """Run the ACT policy until it has the object. Leaves torque on."""
+        return self._start("pick", f"{self.python} ~/fetch.py --no-handoff",
+                           "picking up...", "got it", self.timeout_s)
+
+    def handoff(self) -> dict[str, Any]:
+        """Present what it is holding. Separate from pick ON PURPOSE.
+
+        The board's contract is two commands, not one, and only one may hold the
+        serial port at a time. Keeping them apart is also what makes the manual
+        path useful: a grasp that half worked can be handed over anyway, and a
+        handoff can be repeated without re-running the policy.
+
+        --hold-gripper is not optional. Without it the gripper is included in the
+        sweep, relaxes, and drops whatever it is holding on the way.
+        """
+        # The venv interpreter is explicit here for the same reason as in pick():
+        # arm_poses.py's shebang is /usr/bin/env python3, which on that board has
+        # no lerobot. Run from a login shell it happens to work; run over SSH it
+        # fails with ModuleNotFoundError.
+        return self._start("handoff",
+                           f"{self.python} ~/arm_poses.py goto handoff "
+                           "--hold-gripper --duration 6",
+                           "handing it over...", "there you go", 40.0)
+
+    def _start(self, name: str, cmd: str, busy_text: str, ok_text: str,
+               timeout_s: float) -> dict[str, Any]:
+        if self.target is None:
+            raise RuntimeError("no arm configured; start teleop with --arm USER@HOST")
+        with self._lock:
+            if self._busy:
+                raise RuntimeError("the arm is already moving")
+            self._busy, self._detail = True, busy_text
+        threading.Thread(target=self._run, args=(cmd, ok_text), daemon=True,
+                         name=f"arm-{name}").start()
+        return {"started": True}
+
+    def _run(self, cmd: str, ok_text: str) -> None:
+        import subprocess
+        try:
+            p = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", self.target, cmd],
+                capture_output=True, text=True, timeout=self.timeout_s)
+            tail = (p.stderr or p.stdout or "").strip().splitlines()
+            detail = tail[-1][:160] if tail else ""
+            detail = ok_text if p.returncode == 0 else (detail or "that didn't work")
+        except subprocess.TimeoutExpired:
+            # Never kill it from here: a half-killed fetch.py orphans the serial
+            # port, which is the failure its own docs warn about.
+            detail = "timed out; the arm was left holding position"
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"[:160]
+        with self._lock:
+            self._busy, self._detail = False, detail
 
 
 def serve(session: TeleopSession, host: str = "127.0.0.1", port: int = 8791) -> ThreadingHTTPServer:
