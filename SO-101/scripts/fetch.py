@@ -29,15 +29,29 @@ One JSON object per line on stdout, for the Pi5 to consume directly:
     {"event": "ready", "load_s": 6.6}
     {"event": "step", "n": 12, "hz": 0.97, "grip_pos": 11.4, "grip_current": 480}
     {"event": "grasped", "n": 34, "reason": "gripper_unresponsive"}
+    {"event": "stopping", "reason": "sigterm", "n": 18}
     {"event": "done", "status": "succeeded", "elapsed_s": 41.2}
 
+Stopping
+--------
+SIGTERM (or SIGINT / Ctrl-C) does not tear the process down where it stands. It
+sets a flag that the action loop reads between steps, so the step in flight
+finishes and the run then takes exactly the same exit the timeout takes --
+including robot.disconnect(), which is what keeps /dev/soarm_follower from being
+orphaned. Torque stays on, so a latched gripper keeps holding the object. A
+second signal is ignored on purpose: there is no faster clean stop, and SIGKILL
+leaves the port orphaned.
+
 Exit code 0 = object grasped (and handed off, unless --no-handoff).
-Exit code 1 = timed out or failed. The arm keeps torque either way.
+Exit code 1 = timed out or failed.
+Exit code 3 = stopped on SIGTERM/SIGINT (2 is argparse's own usage error).
+The arm keeps torque in every case.
 """
 
 import argparse
 import json
 import math
+import signal
 import sys
 import time
 from pathlib import Path
@@ -74,6 +88,52 @@ GRIPPER = "gripper"
 # between control tables, so probe rather than assume; if none answer we fall
 # back to timeout-only termination instead of crashing mid-demo.
 GRIP_REGISTERS = ["Present_Current", "Present_Load"]
+
+# Exit codes. The Pi5 reads these; ARM_BOARD.md §1 is the contract.
+EXIT_GRASPED = 0
+EXIT_ABORTED = 1
+EXIT_STOPPED = 3  # 2 is argparse's usage error, so skip it.
+
+# Set by the signal handler, read by the loops. Module level because a handler
+# gets no argument but the signal number.
+_stop_signal = None
+
+
+def _on_stop_signal(signum, _frame):
+    """SIGTERM/SIGINT: record it and return. Tear nothing down here.
+
+    A handler runs between bytecodes, so it can interrupt a print mid-write;
+    emitting from here can deadlock on stdout's lock. It can also interrupt a
+    serial transaction, so it must not touch the bus either. All it does is
+    leave a flag for the loops, which stop at a boundary where nothing is half
+    applied and then take the ordinary shutdown path.
+
+    Later signals are ignored: the first one already asked for the fastest
+    clean stop there is.
+    """
+    global _stop_signal
+    if _stop_signal is None:
+        _stop_signal = signum
+
+
+def install_stop_handlers():
+    """Point SIGTERM and SIGINT at the flag the loops poll."""
+    signal.signal(signal.SIGTERM, _on_stop_signal)
+    signal.signal(signal.SIGINT, _on_stop_signal)
+
+
+def stop_requested():
+    return _stop_signal is not None
+
+
+def stop_reason():
+    """Signal name for the JSON lines: "sigterm" / "sigint", or None."""
+    if _stop_signal is None:
+        return None
+    try:
+        return signal.Signals(_stop_signal).name.lower()
+    except ValueError:
+        return f"signal_{_stop_signal}"
 
 
 def emit(**kw):
@@ -165,6 +225,12 @@ def handoff(robot, duration: float, rate: float):
     dt = 1.0 / rate
     emit(event="handoff", joints=joints, duration_s=duration)
     for i in range(1, steps + 1):
+        # Between interpolation steps is a safe place to stop: the arm holds
+        # wherever it got to, still gripping, instead of finishing a 6 s sweep
+        # after being told to stop.
+        if stop_requested():
+            emit(event="handoff_stopped", reason=stop_reason(), step=i, steps=steps)
+            return False
         # Cosine ease so the arm does not lunge and fling what it is holding.
         a = 0.5 - 0.5 * math.cos(math.pi * i / steps)
         goal = {j: start[j] + (target[j] - start[j]) * a for j in joints}
@@ -197,6 +263,10 @@ def main():
     ap.add_argument("--handoff-duration", type=float, default=6.0)
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
+
+    # Installed before the ~7 s model load, so a stop that arrives during
+    # loading is already waiting when the loop makes its first check.
+    install_stop_handlers()
 
     t0 = time.perf_counter()
     emit(event="loading", checkpoint=args.checkpoint)
@@ -247,6 +317,17 @@ def main():
 
     try:
         while True:
+            # The only place a stop takes effect. A step below is one
+            # observation, one inference and one send_action; ACT hands out
+            # ~100-action chunks and the arm is mid-trajectory through most of
+            # them, so the gap between steps is the finest boundary at which
+            # nothing is half applied -- and the last thing written to the
+            # servos is a complete goal they can hold. From here on it is the
+            # timeout's path: same shutdown, same disconnect.
+            if stop_requested():
+                reason = stop_reason()
+                emit(event="stopping", reason=reason, n=n)
+                break
             elapsed = time.perf_counter() - start
             if elapsed >= args.timeout:
                 reason = "timeout"
@@ -306,8 +387,11 @@ def main():
                 time.sleep(slack)
 
     except KeyboardInterrupt:
-        reason = "interrupted"
-        emit(event="interrupted", n=n)
+        # SIGINT lands in the handler now; this catches one raised before the
+        # handler was installed, and funnels it into the same exit.
+        _on_stop_signal(signal.SIGINT, None)
+        reason = stop_reason()
+        emit(event="stopping", reason=reason, n=n)
 
     did_handoff = False
     if grasped and not args.no_handoff:
@@ -322,10 +406,15 @@ def main():
     except Exception as e:
         emit(event="disconnect_warning", error=str(e)[:120])
 
-    status = "succeeded" if grasped else "aborted"
-    emit(event="done", status=status, reason=reason, steps=n,
+    stopped = stop_requested()
+    status = "stopped" if stopped else ("succeeded" if grasped else "aborted")
+    # `grasped` is explicit because `status` alone no longer says whether the
+    # arm is holding the object: a stop can arrive after the grasp.
+    emit(event="done", status=status, reason=reason, steps=n, grasped=grasped,
          handoff=did_handoff, elapsed_s=round(time.perf_counter() - start, 1))
-    return 0 if grasped else 1
+    if stopped:
+        return EXIT_STOPPED
+    return EXIT_GRASPED if grasped else EXIT_ABORTED
 
 
 if __name__ == "__main__":
