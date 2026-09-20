@@ -202,10 +202,18 @@ class FollowConfig:
     off_path_m: float = 0.30          # this far off the route: re-plan now
     check_ahead_m: float = 1.2        # route turning lethal this far ahead: re-plan now
     patience_s: float = 4.0           # no route this long: give up
-    backoff_after_s: float = 1.2      # blocked this long: back off a little
-    backoff_s: float = 1.2
-    backoff_mps: float = 0.06
-    max_backoffs: int = 2
+    backoff_after_s: float = 0.8      # blocked this long: back off a little
+    backoff_s: float = 1.5
+    backoff_mps: float = 0.12
+    max_backoffs: int = 4
+    blocked_decay: float = 0.25       # how fast a good tick forgives a blocked one
+    # Turning on the spot sweeps the corners -- and with an arm on the front,
+    # that circle is much bigger than the body. The wheels blank four wedges of
+    # the lidar's view, so the thing a corner is about to hit is often one the
+    # scan cannot see FROM HERE. The map remembers it, though, so ask the map
+    # before spinning: no room means back out, not grind round.
+    spin_radius_m: float = 0.0        # 0 disables the check (set from the footprint)
+    spin_margin_m: float = 0.03
     turn_lookahead: float = 2.0       # turn-on-the-spot looks this much further than driving
     speed_rise_tau_s: float = 0.5     # how slowly the clearance speed limit is allowed back up
     # Turning has the same problem driving does: a gear sets one top rate, and
@@ -217,6 +225,11 @@ class FollowConfig:
     turn_decel: float = 1.2           # rad/s^2 the spin really sheds
     turn_reaction_s: float = 0.25     # a tick, the link, and the wheels answering
     turn_min: float = 0.25            # rad/s: never so slow it stalls
+    # Back off turning, not straight: a three-point turn. Reversing buys room
+    # in front AND swings the nose the way the route wants, so the retry starts
+    # from a better angle instead of the one that just failed. Off: reverse
+    # straight, which keeps the angle that got it stuck.
+    reverse_to_turn: bool = True
     stale_scan_s: float = 1.0         # no scan this long: the map is out of date, wait
 
 
@@ -257,6 +270,7 @@ class PathFollower:
         self._why = ""
         self._backoffs = 0
         self._backoff_until: float | None = None
+        self._backoff_wz = 0.0
         self._turning = False
         self._v_room: float | None = None
 
@@ -326,6 +340,30 @@ class PathFollower:
 
     # -- one tick ---------------------------------------------------------
 
+    def _start_backoff(self, p: Pose, cm: Costmap, now: float) -> bool:
+        """Begin reversing out, if there is anywhere to reverse to and any tries
+        left. Returns whether it started."""
+        c = self.config
+        if self._backoff_until is not None or self._backoffs >= c.max_backoffs:
+            return False
+        behind = (p.x - 0.15 * math.cos(p.theta), p.y - 0.15 * math.sin(p.theta))
+        if cm.is_lethal(*behind):
+            return False
+        self._backoffs += 1
+        self._blocked_s = 0.0
+        self._backoff_until = now + c.backoff_s
+        self._backoff_wz = self._turn_away(p) if c.reverse_to_turn else 0.0
+        return True
+
+    def _room_to_spin(self, p: Pose, cm: Costmap) -> bool:
+        """Is there room for the corners to sweep? Asked of the MAP, not of the
+        live scan, because the wheels blank wedges of the lidar's view and the
+        obstacle a corner is about to meet is often in one of them."""
+        r = self.config.spin_radius_m
+        if r <= 0.0:
+            return True
+        return cm.clearance(p.x, p.y) >= r + self.config.spin_margin_m
+
     def _turn_rate(self, alpha: float, w_max: float) -> float:
         """How fast to swing the nose through `alpha`, in rad/s.
 
@@ -339,6 +377,20 @@ class PathFollower:
         stoppable = math.sqrt((a * t) ** 2 + 2.0 * a * abs(alpha)) - a * t
         w = min(abs(c.k_turn * alpha), max(stoppable, c.turn_min), w_max)
         return math.copysign(w, alpha)
+
+    def _turn_away(self, p: Pose) -> float:
+        """Which way to swing the nose while reversing. Toward the route, so the
+        retry starts from a better angle than the one that just failed: backing
+        straight out keeps the heading that got the robot stuck, which is how it
+        ends up wedged against the next thing along. No route to aim at (the
+        planner found none): reverse straight and let the re-plan decide."""
+        if self.path is None or len(self.path) < 2:
+            return 0.0
+        seg, along, _ = self._nearest(p)
+        cx, cy = self._carrot(seg, along)
+        alpha = wrap_angle(math.atan2(cy - p.y, cx - p.x) - p.theta)
+        w = self.limits.w_max
+        return self._turn_rate(alpha, w)
 
     def _stop(self, status: str, reason: str) -> tuple[Action, bool]:
         self.plan = FollowPlan(status, reason)
@@ -362,8 +414,9 @@ class PathFollower:
 
         if self._backoff_until is not None:
             if now < self._backoff_until:
-                self.plan = FollowPlan("waiting", "backing off to get room to turn")
-                return Action(base_vx=-c.backoff_mps), False
+                self.plan = FollowPlan("waiting", "backing off to get room to turn",
+                                       self._backoff_wz / max(c.k_turn, 1e-6), 0.0)
+                return Action(base_vx=-c.backoff_mps, base_wz=self._backoff_wz), False
             self._backoff_until = None
             self._planned_at = -math.inf                # re-plan from where it ended up
 
@@ -389,18 +442,20 @@ class PathFollower:
 
         if self.path is None or refused:
             self._blocked_s += dt
-            if (self._blocked_s > c.backoff_after_s and self._backoffs < c.max_backoffs
-                    and not cm.is_lethal(p.x - 0.15 * math.cos(p.theta), p.y - 0.15 * math.sin(p.theta))):
-                self._backoffs += 1
-                self._blocked_s = 0.0
-                self._backoff_until = now + c.backoff_s
+            if self._blocked_s > c.backoff_after_s and self._start_backoff(p, cm, now):
                 return self._stop("waiting", "backing off to get room to turn")
             if self._blocked_s > c.patience_s:
                 why = ("my safety bubble keeps stopping me" if refused and self.path is not None
                        else self._why)
                 self.failure = (f"I can't find a way there: {why}.", {"blocked": True})
             return self._stop("blocked", self._why if self.path is None else "the bubble stopped me")
-        self._blocked_s = max(0.0, self._blocked_s - dt)
+        # Leaky, NOT symmetric. A refusal stops the robot, a stopped robot is
+        # safe, so the bubble clears and it tries the same thing again: blocked
+        # and clear ticks alternate. Subtracting dt cancelled them exactly, the
+        # counter never reached backoff_after_s, and the robot sat there
+        # flickering between "following" and "the bubble stopped me" instead of
+        # backing out. Trouble has to outlive a good tick to count as over.
+        self._blocked_s = max(0.0, self._blocked_s - c.blocked_decay * dt)
 
         seg, along, _ = self._nearest(p)
         cx, cy = self._carrot(seg, along)
@@ -410,6 +465,16 @@ class PathFollower:
         # -- turn, drive, turn, drive -- which is the jitter seen near a wall.
         gate = c.rotate_exit_deg if self._turning else c.rotate_deg
         if abs(alpha) > math.radians(gate):
+            if not self._room_to_spin(p, cm):
+                # Nose against something and a big turn wanted: reversing is the
+                # obvious move, so make it the FIRST one. Waiting out
+                # backoff_after_s here just grinds against the obstacle for a
+                # second before reaching the same conclusion.
+                self._why = "no room to turn here"
+                if self._start_backoff(p, cm, now):
+                    return self._stop("waiting", "backing out: no room to turn here")
+                self._blocked_s += dt
+                return self._stop("blocked", self._why)
             self._turning = True
             # Aim at a point further along than the driving carrot. Turning to
             # face a close one picks a heading that is right for the next half
