@@ -469,6 +469,68 @@ class TeleopSession:
                 legs.append(_Leg(start, True, "back", list(reversed(curve)), reverse_back))
             self._start_trip(legs, wait_s if come_back else 0.0)
 
+    def approach(self, x: float, y: float, t: float | None = None,
+                 standoff_m: float = 0.0, round_trip: bool = False,
+                 age_s: float | None = None) -> dict:
+        """Drive to something a camera saw, given in the ROBOT's frame.
+
+        For perception on another machine: it knows where the object is
+        relative to the robot (x forward, y left, metres) and when it saw it.
+        It does NOT know the odometry frame, and must not guess -- a pose
+        guessed on another box carries that box's idea of the robot's drift.
+        Here the pose at the capture time is looked up in the same interpolated
+        history that places lidar scans, so a detection half a second old still
+        lands where it was seen from.
+
+        DATING THE DETECTION. Two ways, and which you use depends on where you
+        are. `t` is THIS machine's time.monotonic() -- only callers running here
+        can produce it. `age_s` is how old the detection was when you sent it,
+        which any machine can produce without a synced clock; it is what the
+        depth stream already does (perception/remote.py), and it is the one the
+        central Pi wants. Give one or the other; `t` wins if both arrive. With
+        neither it means "as of now", which on a moving robot costs you up to a
+        body length of error.
+
+        standoff_m stops short of the object along the line of approach, which
+        is what "go to the goose" means for a robot with an arm: reach it, do
+        not park on it. Nose first, because the arm is at the front.
+
+        Returns the world goal it chose, so the caller can log what happened --
+        and so that when something goes to the wrong place you can tell whether
+        the conversion or the detection was wrong.
+        """
+        bx, by = float(x), float(y)
+        if not (math.isfinite(bx) and math.isfinite(by)):
+            raise ValueError("x and y must be finite numbers")
+        reach = math.hypot(bx, by)
+        if reach < 1e-3:
+            raise RuntimeError("that is where the robot already is")
+
+        if t is None and age_s is not None:
+            a = float(age_s)
+            if not math.isfinite(a) or a < 0:
+                raise ValueError("age_s must be a non-negative number of seconds")
+            t = time.monotonic() - a
+
+        if t is None:
+            pose = self._seen.pose
+        else:
+            at = self._pose_at(float(t), laptop_clock=True)
+            if at is None:
+                raise RuntimeError(
+                    f"I have no pose from {time.monotonic() - float(t):.1f} s ago; "
+                    "send detections within about 2 s, dated with age_s")
+            pose, _ = at
+
+        keep = max(0.0, min(float(standoff_m), reach - 0.05))
+        f = (reach - keep) / reach                    # stop short along the same line
+        gx = pose.x + (bx * f) * math.cos(pose.theta) - (by * f) * math.sin(pose.theta)
+        gy = pose.y + (bx * f) * math.sin(pose.theta) + (by * f) * math.cos(pose.theta)
+        self.goto(gx, gy, round_trip=round_trip)
+        return {"x": round(gx, 3), "y": round(gy, 3),
+                "from": [round(pose.x, 3), round(pose.y, 3), round(pose.theta, 4)],
+                "standoff_m": round(keep, 3), "range_m": round(reach, 3)}
+
     def go_home(self) -> None:
         """Drive back to home, arriving NOSE FIRST and stopping there.
 
@@ -1034,6 +1096,11 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                 body = json.loads(self.rfile.read(n) or b"{}") if n else {}
                 if not isinstance(body, dict):
                     raise ValueError("want a JSON object")
+                # Most commands just succeed; /approach answers with the world
+                # goal it chose, so a caller on another machine can tell whether
+                # a wrong destination came from its detection or from the
+                # robot-frame conversion.
+                extra: dict | None = None
                 if self.path == "/drive":
                     session.drive(body.get("fwd", 0.0), body.get("turn", 0.0), body.get("gear"))
                 elif self.path == "/halt":
@@ -1046,6 +1113,12 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
                     session.reset_pose()
                 elif self.path == "/goto":
                     session.goto(body["x"], body["y"], round_trip=bool(body.get("round_trip")))
+                elif self.path == "/approach":
+                    extra = session.approach(
+                        body["x"], body["y"], body.get("t"),
+                        standoff_m=float(body.get("standoff_m", 0.0)),
+                        round_trip=bool(body.get("round_trip")),
+                        age_s=body.get("age_s"))
                 elif self.path == "/path":
                     pts = body["points"]
                     if not isinstance(pts, list):
@@ -1076,7 +1149,10 @@ def make_handler(session: TeleopSession, page: str | None = None) -> type[BaseHT
             except Exception as exc:  # the robot refused (e.g. link down mid-call)
                 self._reply(503, json.dumps({"error": str(exc)}).encode())
                 return
-            self._reply(204)
+            if extra is not None:
+                self._reply(200, json.dumps(extra).encode())
+            else:
+                self._reply(204)
 
         def do_GET(self) -> None:
             if self.path in ("/", "/index.html"):
