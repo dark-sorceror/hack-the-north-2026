@@ -181,12 +181,22 @@ class Mapper:
 class FollowConfig:
     lookahead_m: float = 0.45
     replan_s: float = 0.5
-    rotate_deg: float = 55.0          # carrot further off the nose than this: turn on the spot
+    rotate_deg: float = 45.0          # carrot further off the nose than this: turn on the spot
     k_turn: float = 2.2               # rad/s per rad of heading error, turning on the spot
     lat_accel_max: float = 0.5        # m/s^2 sideways in a bend (pursuit.py's rule)
     align_full_deg: float = 25.0      # full speed while the carrot is this close to the nose
-    slow_clearance_m: float = 0.30    # past lethal: full speed beyond this much room
-    min_speed_scale: float = 0.3      # ...and this fraction of it right at the lethal edge
+    align_floor: float = 0.25         # ...and never less than this fraction of it: see below
+    rotate_exit_deg: float = 25.0     # ...and turns until it is back inside THIS: hysteresis
+    # Never outdrive the lidar. Speed is capped at what can still be stopped
+    # inside the room actually visible, allowing for how old the scan is:
+    #   room = v * reaction + v^2 / (2 * brake)
+    # Solved for v, that is a smooth sqrt(room) curve instead of a step, which
+    # is what makes a high gear usable: fast where it is open, slow where it is
+    # tight, decided by physics rather than by a gear number.
+    reaction_s: float = 0.25          # control period + a lidar revolution
+    brake_mps2: float = 0.8           # what the robot can actually shed
+    slow_clearance_m: float = 0.30    # (kept for the page's speed readout)
+    min_speed_scale: float = 0.3
     creep_mps: float = 0.06
     arrive_gain: float = 1.2          # v <= this * distance left
     off_path_m: float = 0.30          # this far off the route: re-plan now
@@ -196,6 +206,17 @@ class FollowConfig:
     backoff_s: float = 1.2
     backoff_mps: float = 0.06
     max_backoffs: int = 2
+    turn_lookahead: float = 2.0       # turn-on-the-spot looks this much further than driving
+    speed_rise_tau_s: float = 0.5     # how slowly the clearance speed limit is allowed back up
+    # Turning has the same problem driving does: a gear sets one top rate, and
+    # a small correction taken at the top rate overshoots. Same answer -- the
+    # rate that can still be stopped in the angle that is left.
+    # Measured, not assumed: at 1.5 rad/s the link and the ramp together carry
+    # the nose ~20 deg past where the command changed, which is the overshoot
+    # seen on gear 3. These are what the cap has to allow for.
+    turn_decel: float = 1.2           # rad/s^2 the spin really sheds
+    turn_reaction_s: float = 0.25     # a tick, the link, and the wheels answering
+    turn_min: float = 0.25            # rad/s: never so slow it stalls
     stale_scan_s: float = 1.0         # no scan this long: the map is out of date, wait
 
 
@@ -236,6 +257,8 @@ class PathFollower:
         self._why = ""
         self._backoffs = 0
         self._backoff_until: float | None = None
+        self._turning = False
+        self._v_room: float | None = None
 
     # -- the route --------------------------------------------------------
 
@@ -263,9 +286,9 @@ class PathFollower:
                 best = (i, s * math.sqrt(L2), d)
         return best
 
-    def _carrot(self, seg: int, along: float) -> tuple[float, float]:
+    def _carrot(self, seg: int, along: float, ahead: float | None = None) -> tuple[float, float]:
         path = self.path or []
-        left = self.config.lookahead_m
+        left = self.config.lookahead_m if ahead is None else ahead
         i, off = seg, along
         while i < len(path) - 1:
             a, b = path[i], path[i + 1]
@@ -302,6 +325,20 @@ class PathFollower:
         return False
 
     # -- one tick ---------------------------------------------------------
+
+    def _turn_rate(self, alpha: float, w_max: float) -> float:
+        """How fast to swing the nose through `alpha`, in rad/s.
+
+        Proportional, but capped by what can be stopped inside the angle that
+        remains: w <= sqrt(2 * turn_decel * |alpha|), less the reaction time.
+        Without that cap a high gear takes a 10 degree correction at 86 deg/s
+        and sails past it; with it, big turns still go at the gear's rate and
+        small ones ease in."""
+        c = self.config
+        a, t = max(c.turn_decel, 1e-3), c.turn_reaction_s
+        stoppable = math.sqrt((a * t) ** 2 + 2.0 * a * abs(alpha)) - a * t
+        w = min(abs(c.k_turn * alpha), max(stoppable, c.turn_min), w_max)
+        return math.copysign(w, alpha)
 
     def _stop(self, status: str, reason: str) -> tuple[Action, bool]:
         self.plan = FollowPlan(status, reason)
@@ -368,23 +405,65 @@ class PathFollower:
         seg, along, _ = self._nearest(p)
         cx, cy = self._carrot(seg, along)
         alpha = wrap_angle(math.atan2(cy - p.y, cx - p.x) - p.theta)
-        if abs(alpha) > math.radians(c.rotate_deg):
-            wz = max(-lim.w_max, min(lim.w_max, c.k_turn * alpha))
+        # Hysteresis: it takes rotate_deg to START turning on the spot but only
+        # rotate_exit_deg to stop. One threshold made it chatter across the line
+        # -- turn, drive, turn, drive -- which is the jitter seen near a wall.
+        gate = c.rotate_exit_deg if self._turning else c.rotate_deg
+        if abs(alpha) > math.radians(gate):
+            self._turning = True
+            # Aim at a point further along than the driving carrot. Turning to
+            # face a close one picks a heading that is right for the next half
+            # metre and wrong for the corner after it, so the robot arrives
+            # needing a second, harder turn. Looking further ahead commits to a
+            # heading that serves both.
+            fx, fy = self._carrot(seg, along, c.lookahead_m * c.turn_lookahead)
+            far = wrap_angle(math.atan2(fy - p.y, fx - p.x) - p.theta)
+            if abs(far) > math.radians(c.rotate_exit_deg) and far * alpha > 0:
+                alpha = far                    # same way round, just further round
+            wz = self._turn_rate(alpha, lim.w_max)
             self.plan = FollowPlan("turning", "turning to face the way", alpha, 0.0)
             return Action(base_wz=wz), False
+        self._turning = False
 
         ld = max(0.05, math.hypot(cx - p.x, cy - p.y))
         curvature = 2.0 * math.sin(alpha) / ld
         k = max(abs(curvature), 1e-6)
         v = min(lim.v_max, lim.w_max / k, math.sqrt(c.lat_accel_max / k))
-        room = cm.clearance(p.x, p.y) - cm.config.lethal_m
-        scale = c.min_speed_scale + (1.0 - c.min_speed_scale) * max(0.0, min(1.0, room / c.slow_clearance_m))
-        v *= scale
+        # How fast may it go and still stop in the room it can see? A scan is up
+        # to a revolution old and the loop reacts in a tick, so both count as
+        # reaction time. Gear 3 in a corridor now slows itself; gear 1 in an
+        # open room no longer crawls.
+        room = max(0.0, cm.clearance(p.x, p.y) - cm.config.lethal_m)
+        t_r = c.reaction_s + min(self.mapper.scan_age(), 0.5)
+        a_b = max(c.brake_mps2, 1e-3)
+        v_room = math.sqrt((a_b * t_r) ** 2 + 2.0 * a_b * room) - a_b * t_r
+        # Drop instantly, rise slowly. Clearance is measured from a noisy scan,
+        # and because wz = v * curvature, every wobble in it shook the STEERING
+        # as well as the speed -- which is the jitter felt while curving round
+        # something. Falling limits must still apply at once: that direction is
+        # the safe one.
+        if self._v_room is None or v_room <= self._v_room:
+            self._v_room = v_room
+        else:
+            k = min(1.0, dt / max(c.speed_rise_tau_s, 1e-3))
+            self._v_room += k * (v_room - self._v_room)
+        v = min(v, max(c.creep_mps, self._v_room))
         left = math.hypot(end[0] - p.x, end[1] - p.y)
         v = min(v, max(c.creep_mps, c.arrive_gain * left))
         lo = math.cos(math.radians(c.rotate_deg))
         hi = math.cos(math.radians(c.align_full_deg))
-        v *= max(0.0, min(1.0, (math.cos(alpha) - lo) / (hi - lo)))   # lined up before fast
+        # Down to a FLOOR, not to zero. wz = v * curvature, so a factor that
+        # reaches zero kills the turn along with the drive -- and it reached it
+        # at exactly rotate_deg, the angle where turning on the spot takes over.
+        # A carrot a hair inside that (measured on the robot: 54.9 deg of 55)
+        # left the follower commanding 4 mm/s and 0 rad/s, so the angle never
+        # changed and it sat there until the goal timed out.
+        align = (math.cos(alpha) - lo) / (hi - lo)
+        v *= c.align_floor + (1.0 - c.align_floor) * max(0.0, min(1.0, align))
+        if v < c.creep_mps and abs(alpha) > math.radians(c.align_full_deg):
+            wz = self._turn_rate(alpha, lim.w_max)     # arcing is pointless: turn instead
+            self.plan = FollowPlan("turning", "turning to face the way", alpha, 0.0)
+            return Action(base_wz=wz), False
         wz = v * curvature
         if abs(wz) > lim.w_max:                       # too tight for this speed: slow, keep the arc
             v *= lim.w_max / abs(wz)
