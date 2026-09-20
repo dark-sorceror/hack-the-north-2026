@@ -1,0 +1,169 @@
+diff --git a/src/lerobot/motors/motors_bus.py b/src/lerobot/motors/motors_bus.py
+index 509f5e95..cf261c40 100644
+--- a/src/lerobot/motors/motors_bus.py
++++ b/src/lerobot/motors/motors_bus.py
+@@ -23,6 +23,7 @@ from __future__ import annotations
+ 
+ import abc
+ import logging
++import time
+ from collections.abc import Sequence
+ from contextlib import contextmanager
+ from dataclasses import dataclass
+@@ -452,11 +453,19 @@ class SerialMotorsBus(MotorsBusBase):
+     def _assert_motors_exist(self) -> None:
+         expected_models = {m.id: self.model_number_table[m.model] for m in self.motors.values()}
+ 
++        # Retry the WHOLE scan, not just individual pings. Per-ping num_retry
++        # retries back-to-back within microseconds and does not recover; a
++        # fresh scan a moment later does.
+         found_models = {}
+-        for id_ in self.ids:
+-            model_nb = self.ping(id_)
+-            if model_nb is not None:
+-                found_models[id_] = model_nb
++        for _scan in range(4):
++            found_models = {}
++            for id_ in self.ids:
++                model_nb = self.ping(id_, num_retry=3)
++                if model_nb is not None:
++                    found_models[id_] = model_nb
++            if all(id_ in found_models for id_ in self.ids):
++                break
++            time.sleep(0.15)
+ 
+         missing_ids = [id_ for id_ in self.ids if id_ not in found_models]
+         wrong_models = {
+@@ -1165,9 +1174,20 @@ class SerialMotorsBus(MotorsBusBase):
+         err_msg: str = "",
+     ) -> tuple[dict[int, int], int]:
+         self._setup_sync_reader(motor_ids, addr, length)
++
++        def _all_present() -> bool:
++            # txRxPacket() can report comm success while an individual servo
++            # returned nothing, leaving data_dict[id] as None. getData() then
++            # indexes into None and raises TypeError, which escapes the retry
++            # loop and kills recording mid-episode.
++            try:
++                return all(self.sync_reader.isAvailable(id_, addr, length)[0] for id_ in motor_ids)
++            except Exception:
++                return False
++
+         for n_try in range(1 + num_retry):
+             comm = self.sync_reader.txRxPacket()
+-            if self._is_comm_success(comm):
++            if self._is_comm_success(comm) and _all_present():
+                 break
+             logger.debug(
+                 f"Failed to sync read @{addr=} ({length=}) on {motor_ids=} ({n_try=}): "
+@@ -1177,6 +1197,12 @@ class SerialMotorsBus(MotorsBusBase):
+         if not self._is_comm_success(comm) and raise_on_error:
+             raise ConnectionError(f"{err_msg} {self.packet_handler.getTxRxResult(comm)}")
+ 
++        if not _all_present():
++            missing = [id_ for id_ in motor_ids if not self.sync_reader.isAvailable(id_, addr, length)[0]]
++            if raise_on_error:
++                raise ConnectionError(f"{err_msg} No data returned for motor ids {missing}.")
++            return {id_: None for id_ in motor_ids}, comm
++
+         values = {id_: self.sync_reader.getData(id_, addr, length) for id_ in motor_ids}
+         return values, comm
+ 
+diff --git a/src/lerobot/robots/so_follower/so_follower.py b/src/lerobot/robots/so_follower/so_follower.py
+index ac49a91d..bdede900 100644
+--- a/src/lerobot/robots/so_follower/so_follower.py
++++ b/src/lerobot/robots/so_follower/so_follower.py
+@@ -177,7 +177,7 @@ class SOFollower(Robot):
+     def get_observation(self) -> RobotObservation:
+         # Read arm position
+         start = time.perf_counter()
+-        obs_dict = self.bus.sync_read("Present_Position")
++        obs_dict = self.bus.sync_read("Present_Position", num_retry=3)
+         obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
+         dt_ms = (time.perf_counter() - start) * 1e3
+         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
+@@ -211,7 +211,7 @@ class SOFollower(Robot):
+         # Cap goal position when too far away from present position.
+         # /!\ Slower fps expected due to reading from the follower.
+         if self.config.max_relative_target is not None:
+-            present_pos = self.bus.sync_read("Present_Position")
++            present_pos = self.bus.sync_read("Present_Position", num_retry=3)
+             goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
+             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+ 
+diff --git a/src/lerobot/scripts/lerobot_record.py b/src/lerobot/scripts/lerobot_record.py
+index c58f8f10..b981d607 100644
+--- a/src/lerobot/scripts/lerobot_record.py
++++ b/src/lerobot/scripts/lerobot_record.py
+@@ -472,10 +472,20 @@ def record_loop(
+         dt_s = time.perf_counter() - start_loop_t
+ 
+         sleep_time_s: float = control_interval - dt_s
+-        if sleep_time_s < 0:
+-            logging.warning(
+-                f"Record loop is running slower ({1 / dt_s:.1f} Hz) than the target FPS ({fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
+-            )
++        # Warn only when genuinely behind, and at most once every few seconds.
++        # The original fired on ANY overrun, so normal 28-30Hz jitter buried the
++        # 'Recording episode N' / 'Reset the environment' messages in scrollback.
++        # A real stall (e.g. 8.5Hz) still shows up immediately.
++        if dt_s > control_interval * 1.25:
++            _now = time.perf_counter()
++            _last = getattr(logging, '_lerobot_last_slow_warn', 0.0)
++            if _now - _last > 5.0:
++                logging._lerobot_last_slow_warn = _now
++                logging.warning(
++                    'Record loop running slower (%.1f Hz) than target (%d Hz). '
++                    'Causes: camera FPS, inference time, or CPU starvation. '
++                    '(further warnings suppressed for 5s)' % (1 / dt_s, fps)
++                )
+ 
+         precise_sleep(max(sleep_time_s, 0.0))
+ 
+diff --git a/src/lerobot/teleoperators/so_leader/so_leader.py b/src/lerobot/teleoperators/so_leader/so_leader.py
+index 97d0f443..db930605 100644
+--- a/src/lerobot/teleoperators/so_leader/so_leader.py
++++ b/src/lerobot/teleoperators/so_leader/so_leader.py
+@@ -139,7 +139,7 @@ class SOLeader(Teleoperator):
+     @check_if_not_connected
+     def get_action(self) -> dict[str, float]:
+         start = time.perf_counter()
+-        action = self.bus.sync_read("Present_Position")
++        action = self.bus.sync_read("Present_Position", num_retry=3)
+         action = {f"{motor}.pos": val for motor, val in action.items()}
+         dt_ms = (time.perf_counter() - start) * 1e3
+         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
+diff --git a/src/lerobot/utils/control_utils.py b/src/lerobot/utils/control_utils.py
+index 94cd82fa..12b65f50 100644
+--- a/src/lerobot/utils/control_utils.py
++++ b/src/lerobot/utils/control_utils.py
+@@ -141,6 +141,29 @@ def init_keyboard_listener():
+         logging.warning(
+             "Headless environment detected. On-screen cameras display and keyboard inputs will not be available."
+         )
++        # Headless (e.g. plain SSH): pynput needs an X display, so the arrow-key
++        # controls are dead and episodes run their full duration with no way to
++        # re-record a bad one. The control flow is just this dict, so drive it
++        # from stdin instead - works over SSH and needs no X server.
++        import sys as _sys
++        import threading as _threading
++
++        def _stdin_reader():
++            msg = ('[headless controls] n = end episode | '
++                   'r = re-record it | q = stop session')
++            print(msg, flush=True)
++            for line in _sys.stdin:
++                cmd = line.strip().lower()
++                if cmd == 'n':          # bare ENTER deliberately ignored
++                    events['exit_early'] = True
++                elif cmd == 'r':
++                    events['rerecord_episode'] = True
++                    events['exit_early'] = True
++                elif cmd == 'q':
++                    events['stop_recording'] = True
++                    events['exit_early'] = True
++
++        _threading.Thread(target=_stdin_reader, daemon=True).start()
+         listener = None
+         return listener, events
+ 
