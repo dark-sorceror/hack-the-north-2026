@@ -19,7 +19,10 @@ DATASET="${DATASET:-$USER_NS/pickup_v2}"
 OUT_REPO="${OUT_REPO:-$USER_NS/act-pickup-v2}"
 # a10g-large: 12 vCPU / 24GB GPU / $1.50-hr. vCPU count matters more than
 # GPU class here - AV1 decode feeds the GPU and is the real bottleneck.
-FLAVOR="${FLAVOR:-a10g-large}"
+FLAVOR="${FLAVOR:-rtx-pro-6000}"
+# Match the flavor vCPU count: AV1 decode feeds the GPU and is the real
+# bottleneck, so this buys more speed than a bigger GPU.
+NUM_WORKERS="${NUM_WORKERS:-20}"
 SMOKE="${SMOKE:-0}"
 TIMEOUT="${TIMEOUT:-6h}"
 IMAGE="${IMAGE:-pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel}"
@@ -60,7 +63,7 @@ lerobot-train \
   --steps=$STEPS \
   --batch_size=$BATCH \
   --save_freq=$SAVE \
-  --num_workers=8 \
+  --num_workers=$NUM_WORKERS \
   --wandb.enable=false
 echo "=== done ==="
 EOF
