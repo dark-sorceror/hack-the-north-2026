@@ -24,6 +24,10 @@ DATA_TARBALL="${DATA_TARBALL:-pickup_v2_56ep.tar.gz}"
 DATA_DIR="${DATA_DIR:-pickup_v2}"
 REPO_ID="${REPO_ID:-local/pickup_v2}"
 OUT="${OUT:-$HOME/outputs/act_pickup}"
+# Video decode feeds the GPU, so match this to the vCPU count.
+NUM_WORKERS="${NUM_WORKERS:-8}"
+# Lower = less lost to a dead/preempted instance. 10k is ~20 min.
+SAVE_FREQ="${SAVE_FREQ:-10000}"
 
 echo "=== host ==="
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \
@@ -81,7 +85,7 @@ PY
 
 mkdir -p "$OUT"
 if [ "$SMOKE" = "1" ]; then STEPS=2000;   BATCH=32; SAVE=1000
-else                        STEPS=100000; BATCH=64; SAVE=20000; fi
+else                        STEPS=100000; BATCH=64; SAVE="$SAVE_FREQ"; fi
 
 ARGS=(
   --dataset.repo_id="$REPO_ID"
@@ -92,7 +96,7 @@ ARGS=(
   --steps="$STEPS"
   --batch_size="$BATCH"
   --save_freq="$SAVE"
-  --num_workers=8
+  --num_workers="$NUM_WORKERS"
   --wandb.enable=false
 )
 
