@@ -123,6 +123,36 @@ def raw_scan(world, t=0.0):
 # ---------------------------------------------------------------- the rules
 
 
+class TestRangedMask(unittest.TestCase):
+    """A sector mask blinds the robot at EVERY range that way. Right for a
+    wheel, which fills the view; wrong for a bracket standing off the chassis,
+    where blanking the sector hides the room behind it too -- and the robot
+    then drives into what it cannot see."""
+
+    def test_a_ranged_sector_hides_the_bracket_and_keeps_the_room(self):
+        m = parse_mask("266:290:0.5")
+        a = DEG(275)
+        self.assertTrue(in_mask(a, m, 0.35))     # the bracket
+        self.assertTrue(in_mask(a, m, 0.49))
+        self.assertFalse(in_mask(a, m, 0.60))    # a chair beyond it
+        self.assertFalse(in_mask(a, m, 2.00))
+
+    def test_a_plain_sector_still_hides_everything(self):
+        m = parse_mask("14:19")
+        self.assertTrue(in_mask(DEG(16), m, 0.3))
+        self.assertTrue(in_mask(DEG(16), m, 5.0))
+        self.assertTrue(in_mask(DEG(16), m))     # no range given: as before
+
+    def test_outside_the_sector_is_never_masked(self):
+        m = parse_mask("266:290:0.5")
+        self.assertFalse(in_mask(DEG(100), m, 0.2))
+
+    def test_a_bad_interval_says_so(self):
+        for bad in ("266:290:0", "1:2:3:4", "nonsense"):
+            with self.assertRaises(ValueError):
+                parse_mask(bad)
+
+
 class TestNoseFootprint(unittest.TestCase):
     """An arm reaching past the chassis is narrow. Squaring it off into a
     full-width front was refusing curves for corners the robot doesn't have."""
