@@ -20,9 +20,9 @@ set -euo pipefail
 SMOKE="${SMOKE:-1}"
 MULTI_GPU="${MULTI_GPU:-0}"
 NPROC="${NPROC:-4}"
-DATA_TARBALL="${DATA_TARBALL:-pickup_v1_10ep.tar.gz}"
-DATA_DIR="${DATA_DIR:-archive_pickup_v1_10ep_0920_1126}"
-REPO_ID="${REPO_ID:-local/pickup_v1}"
+DATA_TARBALL="${DATA_TARBALL:-pickup_v2_56ep.tar.gz}"
+DATA_DIR="${DATA_DIR:-pickup_v2}"
+REPO_ID="${REPO_ID:-local/pickup_v2}"
 OUT="${OUT:-$HOME/outputs/act_pickup}"
 
 echo "=== host ==="
