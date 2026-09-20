@@ -102,11 +102,32 @@ These are load-bearing. The `motors_bus.py` retry patches took connect failures
 from roughly 1-in-3 down to 0-in-20, and without them mid-episode reads crash
 with `TypeError: 'NoneType' object is not subscriptable`.
 
+What they fix:
+
+| File | Change |
+|---|---|
+| `motors_bus.py` | per-ping retry, whole-scan retry loop, and an `_all_present()` guard in `_sync_read` that raises `ConnectionError` instead of `TypeError` when a servo returns nothing |
+| `so_follower.py`, `so_leader.py` | `sync_read` with `num_retry=3` |
+| `lerobot_record.py` | rate-limited slow-loop warning (once per 5 s) instead of a flood |
+| `control_utils.py` | headless stdin controls (`n` end, `r` re-record, `q` stop) |
+
 **Consequences for integration:**
 - A fresh clone of the fork at `a24998f7` will be *less reliable* than this board
 - Re-cloning, `git checkout .`, or `git stash` in that directory **will break the arm**
-- `scripts/lerobot-bus-retry.patch` in this repo captures the bus retry changes;
-  the rest currently exist only on the board's disk
+
+All five are captured in `scripts/lerobot-board-patches.patch`. To rebuild the
+board's software state from scratch:
+
+```bash
+git clone https://github.com/Hiwonder-official/hiwonder-SoArm-101.git
+cd hiwonder-SoArm-101
+git checkout a24998f7ba3c77ea445b48c92ad15c14a50e492a
+git apply /path/to/scripts/lerobot-board-patches.patch
+uv sync                      # needs Python 3.12; 3.14 breaks draccus
+```
+
+Then restore the calibration file (below) — without it the arm will not move
+correctly even with the patches applied.
 
 ### Calibration is machine-local and must not be regenerated
 
