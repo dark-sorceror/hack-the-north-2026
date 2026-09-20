@@ -7,3 +7,4 @@ __pycache__/
 artifacts/
 *.pcm
 *.wav
+weights/clip/ViT-B-32.pt
