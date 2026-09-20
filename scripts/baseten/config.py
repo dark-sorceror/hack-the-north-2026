@@ -1,7 +1,12 @@
 """Baseten Training job for the ACT policy.
 
-    baseten train push --config config.py
-    baseten train job logs --job-id <job_id> --tail
+    truss login                     # API key from the Baseten dashboard
+    truss train push config.py
+    truss train logs --job-id <job_id> --tail
+
+The CLI is `truss`, not `baseten` - the docs say otherwise but the pip
+package `baseten` is only a thin API SDK and installs no CLI. `truss`
+provides both the command and the truss_train module imported below.
 
 The whole directory containing this file is uploaded with the job, so keep the
 dataset tarball and run.sh next to it.
