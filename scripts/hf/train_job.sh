@@ -61,7 +61,9 @@ PYCHK
 # is cancelled or times out yields nothing - /tmp dies with the container.
 # Sync checkpoints up as they appear instead, so the run can be stopped at any
 # point and the newest checkpoint is already safe on the Hub.
-mkdir -p /tmp/act_out
+# Deliberately NOT creating /tmp/act_out here: lerobot refuses to start if
+# output_dir already exists and resume is false. The sync loop below
+# tolerates it being absent until training creates it.
 (
   while true; do
     sleep 240
