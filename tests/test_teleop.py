@@ -21,6 +21,7 @@ from retriever.bridge.lidar import FakeLidar, FakeTankPose, FakeWorld
 from retriever.bridge.server import BridgeServer, ServerThread
 from retriever.types import Pose
 from retriever.teleop import (
+    ARRIVE_M,
     DriveRecorder,
     TeleopConfig,
     TeleopCore,
@@ -253,7 +254,7 @@ class TestClickToGo(BridgeCase):
         snap = wait_done(s)
         self.assertEqual(snap["auto"]["status"], "arrived", snap["auto"])
         x, y, _ = snap["pose"]
-        self.assertAlmostEqual(x, 0.6, delta=0.1)
+        self.assertAlmostEqual(x, 0.6, delta=ARRIVE_M + 0.05)
         self.assertAlmostEqual(y, 0.0, delta=0.05)
         time.sleep(0.5)                                   # ramped down, not coasting on
         self.assertEqual(self.wheels(), (0.0, 0.0))
@@ -265,7 +266,7 @@ class TestClickToGo(BridgeCase):
         s.goto(-0.3, 0.4)
         snap = wait_done(s)
         self.assertEqual(snap["auto"]["status"], "arrived", snap["auto"])
-        self.assertLess(math.hypot(snap["pose"][0] + 0.3, snap["pose"][1] - 0.4), 0.12)
+        self.assertLess(math.hypot(snap["pose"][0] + 0.3, snap["pose"][1] - 0.4), ARRIVE_M + 0.05)
 
     def test_a_drive_key_takes_over_but_letting_go_does_not(self):
         s = self.session()
@@ -321,17 +322,24 @@ class TestClickToGo(BridgeCase):
 class TestHome(BridgeCase):
     """No lidar, as on the first autonomous test: straight lines, odometry only."""
 
-    def test_go_home_drives_back_and_faces_the_way_it_started(self):
+    def test_go_home_arrives_nose_first_and_does_not_spin(self):
+        """Home is a hand-off: it ends pointing the way it came in, arm toward
+        whoever is there, and does NOT spin to the heading home was set at."""
         s = self.session()
         s.core.gear = 2
         s.goto(0.6, 0.4)
         self.assertEqual(wait_done(s)["auto"]["status"], "arrived")
+        approach = math.atan2(-0.4, -0.6)              # from (0.6, 0.4) back to home
         s.go_home()
         snap = wait_done(s)
         self.assertEqual(snap["auto"]["status"], "home", snap["auto"])
         x, y, th = snap["pose"]
-        self.assertLess(math.hypot(x, y), 0.1)
-        self.assertLess(abs(math.degrees(math.remainder(th, math.tau))), 5.0)
+        self.assertLess(math.hypot(x, y), ARRIVE_M + 0.05)
+        off = abs(math.degrees(math.remainder(th - approach, math.tau)))
+        self.assertLess(off, 50.0, f"ended {off:.0f} deg off the way it drove in")
+        # The point of the change: it must NOT have spun back to home's heading.
+        spun = abs(math.degrees(math.remainder(th, math.tau)))
+        self.assertGreater(spun, 45.0, "spun back to home's original heading")
 
     def test_round_trip_goes_there_waits_and_comes_back(self):
         s = self.session()
@@ -346,9 +354,9 @@ class TestHome(BridgeCase):
             time.sleep(0.05)
         snap = s.snapshot()
         self.assertTrue(waited)
-        self.assertGreater(far, 0.6)                     # it really went out there
+        self.assertGreater(far, 0.7 - ARRIVE_M - 0.02)   # it really went out there
         self.assertEqual(snap["auto"]["status"], "home", snap["auto"])
-        self.assertLess(math.hypot(snap["pose"][0], snap["pose"][1]), 0.1)
+        self.assertLess(math.hypot(snap["pose"][0], snap["pose"][1]), ARRIVE_M + 0.05)
         self.assertLess(abs(math.degrees(math.remainder(snap["pose"][2], math.tau))), 5.0)
 
     def test_set_home_moves_home(self):
@@ -363,8 +371,8 @@ class TestHome(BridgeCase):
         s.go_home()
         snap = wait_done(s)
         self.assertEqual(snap["auto"]["status"], "home")
-        self.assertLess(math.hypot(snap["pose"][0] - home[0], snap["pose"][1] - home[1]), 0.1)
-        self.assertLess(abs(math.remainder(snap["pose"][2] - home[2], math.tau)), math.radians(5))
+        self.assertLess(math.hypot(snap["pose"][0] - home[0], snap["pose"][1] - home[1]), ARRIVE_M + 0.05)
+        # Home's heading is no longer restored: it stops facing the way it came.
 
     def watch(self, s, timeout=30.0):
         """Run the trip to the end; (min commanded vx, snapshot)."""
@@ -382,7 +390,7 @@ class TestHome(BridgeCase):
         self.assertEqual(snap["auto"]["status"], "arrived", snap["auto"])
         self.assertLess(lo, -0.05)                               # it reversed
         self.assertLess(abs(math.degrees(math.remainder(snap["pose"][2], math.tau))), 20)
-        self.assertLess(math.hypot(snap["pose"][0] + 0.8, snap["pose"][1] - 0.1), 0.12)
+        self.assertLess(math.hypot(snap["pose"][0] + 0.8, snap["pose"][1] - 0.1), ARRIVE_M + 0.05)
 
     def test_a_far_spot_behind_turns_round_nose_first(self):
         s = self.session()
@@ -406,10 +414,13 @@ class TestHome(BridgeCase):
         snap = s.snapshot()
         self.assertTrue(reversed_home)
         self.assertEqual(snap["auto"]["status"], "home", snap["auto"])
-        self.assertLess(math.hypot(snap["pose"][0], snap["pose"][1]), 0.12)
+        self.assertLess(math.hypot(snap["pose"][0], snap["pose"][1]), ARRIVE_M + 0.05)
         self.assertLess(abs(math.degrees(math.remainder(snap["pose"][2], math.tau))), 5)
 
-    def test_go_home_backs_up_when_that_turns_least(self):
+    def test_go_home_drives_in_forwards(self):
+        """It used to back home (which cancels turn slip) and then spin. A
+        hand-off wants the nose -- and the arm -- pointing at the person, so
+        the home leg drives forwards and stops."""
         s = self.session()
         s.core.gear = 2
         s.goto(0.8, 0.0)
@@ -417,8 +428,8 @@ class TestHome(BridgeCase):
         s.go_home()
         lo, snap = self.watch(s)
         self.assertEqual(snap["auto"]["status"], "home", snap["auto"])
-        self.assertLess(lo, -0.05)
-        self.assertLess(abs(math.degrees(math.remainder(snap["pose"][2], math.tau))), 5)
+        self.assertGreaterEqual(lo, -0.05, "backed home instead of driving in nose first")
+        self.assertLess(math.hypot(snap["pose"][0], snap["pose"][1]), ARRIVE_M + 0.05)
 
     def test_least_turning(self):
         from retriever.teleop import least_turning_is_reverse

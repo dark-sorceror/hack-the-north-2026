@@ -75,6 +75,26 @@ def main() -> int:
                          "(overrides the Pi's until its bridge runs with --scrub-factor too)")
     ap.add_argument("--footprint", default="0.25,0.25,0.20",
                     help="front,rear,half-width in m, for drawing the robot")
+    ap.add_argument("--map-min-range", type=float, default=0.45, metavar="M",
+                    help="lidar returns closer than this to the robot's centre never reach "
+                         "the map (default 0.45: the arm reaches 0.42, so anything nearer is "
+                         "the robot itself). The Pi's safety bubble still sees them")
+    ap.add_argument("--claw", type=float, default=0.0, metavar="M",
+                    help="how much of --footprint's FRONT is arm rather than chassis. The "
+                         "safety bubble uses the whole outline either way; this only stops "
+                         "the page drawing the arm as if it were bodywork")
+    ap.add_argument("--camera", default="auto", metavar="URL",
+                    help="MJPEG stream to show on the page. 'auto' (default) points at the "
+                         "robot Pi's port 8790, where scripts/cam_stream.py serves it; "
+                         "'off' hides the panel")
+    ap.add_argument("--clearance", type=float, default=0.02, metavar="M",
+                    help="metres the route keeps clear PAST the body (default 0.02). The "
+                         "bubble still sweeps the real footprint, so this only decides how "
+                         "narrow a gap a route may aim at")
+    ap.add_argument("--wide-gaps", action="store_true",
+                    help="plan with the circumscribed radius (clear at every heading, so it "
+                         "can always turn on the spot) instead of the body half width: "
+                         "safer, but it refuses gaps the robot actually fits through")
     ap.add_argument("--no-open", action="store_true", help="don't open a browser tab")
     args = ap.parse_args()
 
@@ -112,7 +132,19 @@ def main() -> int:
                     "journalctl -u retriever-bridge -n 5") from None
             raise
 
-    session = TeleopSession(connect, config, recorder, footprint=footprint).start()
+    camera_url: str | None
+    if args.camera == "off" or (args.camera == "auto" and not args.bridge):
+        camera_url = None                      # a sim has no camera to show
+    elif args.camera == "auto":
+        camera_url = f"http://{args.bridge.split(':')[0]}:8790/stream.mjpg"
+    else:
+        camera_url = args.camera
+
+    session = TeleopSession(connect, config, recorder, footprint=footprint,
+                            tight_gaps=not args.wide_gaps,
+                            clearance_m=args.clearance,
+                            camera_url=camera_url, claw_m=args.claw,
+                            map_min_range_m=args.map_min_range).start()
     try:
         httpd = serve(session, args.listen, args.port)
     except OSError as exc:
