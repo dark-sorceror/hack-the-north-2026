@@ -143,20 +143,45 @@ class Footprint:
     front_m: float = 0.25
     rear_m: float = 0.25
     half_width_m: float = 0.20
+    # An arm reaching past the chassis is NARROW, and squaring it off costs
+    # exactly where it hurts: widening the whole front face put the modelled
+    # corners 17 cm beyond the real ones on the diagonals, so straight ahead and
+    # straight back read true while every curve was refused early.
+    nose_m: float = 0.0               # how far the arm reaches past front_m
+    nose_half_width_m: float = 0.0    # half width of that reach
 
     def __post_init__(self) -> None:
         if self.front_m <= 0 or self.rear_m <= 0 or self.half_width_m <= 0:
             raise ValueError("footprint dimensions must be positive")
+        if self.nose_m < 0 or self.nose_half_width_m < 0:
+            raise ValueError("nose dimensions must not be negative")
+        if self.nose_half_width_m > self.half_width_m:
+            raise ValueError("a nose wider than the body is just a longer body: "
+                             "put it in front_m")
+
+    @property
+    def has_nose(self) -> bool:
+        return self.nose_m > 0.0 and self.nose_half_width_m > 0.0
 
     def clearance(self, x: float, y: float) -> float:
-        """Distance from (x, y) to the rectangle; 0 inside."""
+        """Distance from (x, y) to the outline (chassis, plus the nose); 0 inside."""
         dx = max(-self.rear_m - x, 0.0, x - self.front_m)
         dy = max(abs(y) - self.half_width_m, 0.0)
-        return math.hypot(dx, dy)
+        d = math.hypot(dx, dy)
+        if self.has_nose:
+            ndx = max(self.front_m - x, 0.0, x - (self.front_m + self.nose_m))
+            ndy = max(abs(y) - self.nose_half_width_m, 0.0)
+            d = min(d, math.hypot(ndx, ndy))
+        return d
 
     def corners(self, pad: float = 0.0) -> list[tuple[float, float]]:
+        """The outline's vertices, in order round it."""
         f, r, w = self.front_m + pad, self.rear_m + pad, self.half_width_m + pad
-        return [(f, w), (f, -w), (-r, w), (-r, -w)]
+        if not self.has_nose:
+            return [(f, w), (f, -w), (-r, w), (-r, -w)]
+        nf = self.front_m + self.nose_m + pad
+        nw = self.nose_half_width_m + pad
+        return [(nf, nw), (nf, -nw), (f, -nw), (f, -w), (-r, -w), (-r, w), (f, w), (f, nw)]
 
     def radius(self, pad: float = 0.0) -> float:
         return max(math.hypot(x, y) for x, y in self.corners(pad))
@@ -463,12 +488,18 @@ class SafetyBubble:
         return math.inf
 
     def _outline(self, spacing: float = 0.05) -> list[tuple[float, float]]:
-        """Points every ~spacing m around the inflated footprint's edge."""
+        """Points every ~spacing m around the inflated footprint's edge. Walks
+        whatever polygon the footprint is -- a rectangle, or a chassis with a
+        narrow nose -- so an arm is swept as the thin thing it is."""
         pad = self.config.body_margin_m
-        (fx, fy), _, (rx, _), _ = self.config.footprint.corners(pad)
+        fp = self.config.footprint
+        verts = fp.corners(pad) if fp.has_nose else [
+            (fp.front_m + pad, -(fp.half_width_m + pad)),
+            (fp.front_m + pad, fp.half_width_m + pad),
+            (-(fp.rear_m + pad), fp.half_width_m + pad),
+            (-(fp.rear_m + pad), -(fp.half_width_m + pad))]
         out = []
-        for (x0, y0), (x1, y1) in (((fx, -fy), (fx, fy)), ((fx, fy), (rx, fy)),
-                                   ((rx, fy), (rx, -fy)), ((rx, -fy), (fx, -fy))):
+        for (x0, y0), (x1, y1) in zip(verts, verts[1:] + verts[:1]):
             n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / spacing))
             out += [(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n) for i in range(n)]
         return out
@@ -690,6 +721,10 @@ def add_lidar_args(ap: argparse.ArgumentParser) -> None:
     g.add_argument("--lidar-mask", default="",
                    help="blind sectors, lidar-frame degrees CCW, e.g. '100:140,350:10' "
                         "(scripts/lidar_check.py --record-mask prints this)")
+    g.add_argument("--nose", default=None, metavar="LEN,HALF_WIDTH",
+                   help="an arm reaching past the footprint's front, in m, e.g. '0.20,0.06'. "
+                        "Swept as a narrow nose rather than a full-width slab, so curves are "
+                        "not refused for corners the robot does not have")
     g.add_argument("--footprint", default="0.25,0.25,0.20",
                    help="FRONT,REAR,HALF_WIDTH in metres from the base centre (measure it)")
     g.add_argument("--bubble-decel", type=float, default=BubbleConfig.decel_mps2,
@@ -718,17 +753,23 @@ def add_lidar_args(ap: argparse.ArgumentParser) -> None:
                    help="rate of the downsampled scan sent to subscribed laptops")
 
 
-def parse_footprint(text: str) -> Footprint:
+def parse_footprint(text: str, nose: str | None = None) -> Footprint:
     try:
         front, rear, half = (float(v) for v in text.split(","))
     except ValueError:
         raise ValueError(f"--footprint wants FRONT,REAR,HALF_WIDTH, got {text!r}") from None
-    return Footprint(front, rear, half)
+    if not nose:
+        return Footprint(front, rear, half)
+    try:
+        reach, half_w = (float(v) for v in nose.split(","))
+    except ValueError:
+        raise ValueError(f"--nose wants LEN,HALF_WIDTH, got {nose!r}") from None
+    return Footprint(front, rear, half, nose_m=reach, nose_half_width_m=half_w)
 
 
 def bubble_config_from_args(args: argparse.Namespace) -> BubbleConfig:
     return BubbleConfig(
-        footprint=parse_footprint(args.footprint),
+        footprint=parse_footprint(args.footprint, getattr(args, 'nose', None)),
         mount=LidarMount(args.lidar_x, args.lidar_y, math.radians(args.lidar_yaw_deg),
                          args.lidar_inverted),
         mask=parse_mask(args.lidar_mask),
