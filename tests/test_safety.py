@@ -123,6 +123,49 @@ def raw_scan(world, t=0.0):
 # ---------------------------------------------------------------- the rules
 
 
+class TestNoseFootprint(unittest.TestCase):
+    """An arm reaching past the chassis is narrow. Squaring it off into a
+    full-width front was refusing curves for corners the robot doesn't have."""
+
+    def reach(self, fp, deg):
+        import math
+        a = math.radians(deg)
+        lo, hi = 0.0, 1.5
+        for _ in range(40):
+            mid = (lo + hi) / 2
+            if fp.clearance(mid * math.cos(a), mid * math.sin(a)) > 0:
+                hi = mid
+            else:
+                lo = mid
+        return lo
+
+    def test_the_nose_reaches_ahead_without_fattening_the_corners(self):
+        slab = Footprint(0.42, 0.22, 0.185)
+        nose = Footprint(0.22, 0.22, 0.185, nose_m=0.20, nose_half_width_m=0.06)
+        self.assertAlmostEqual(self.reach(nose, 0), 0.42, places=2)       # arm still covered
+        self.assertAlmostEqual(self.reach(nose, 90), 0.185, places=2)     # sides untouched
+        self.assertLess(self.reach(nose, 20), self.reach(slab, 20) - 0.15)  # diagonals freed
+        self.assertAlmostEqual(self.reach(nose, 60), self.reach(slab, 60), places=2)
+
+    def test_a_point_beside_the_nose_is_outside_the_robot(self):
+        nose = Footprint(0.22, 0.22, 0.185, nose_m=0.20, nose_half_width_m=0.06)
+        self.assertEqual(nose.clearance(0.30, 0.0), 0.0)        # in front: that is the arm
+        self.assertGreater(nose.clearance(0.30, 0.15), 0.05)    # beside it: clear air
+
+    def test_the_swept_outline_walks_the_nose(self):
+        from retriever.bridge.safety import SafetyBubble, BubbleConfig
+        fp = Footprint(0.22, 0.22, 0.185, nose_m=0.20, nose_half_width_m=0.06)
+        b = SafetyBubble(BubbleConfig(footprint=fp))
+        pts = b._outline()
+        self.assertTrue(any(x > 0.40 for x, _ in pts), "the nose tip is not swept")
+        wide = [(x, y) for x, y in pts if x > 0.30 and abs(y) > 0.12]
+        self.assertFalse(wide, f"swept corners the robot does not have: {wide[:3]}")
+
+    def test_a_nose_wider_than_the_body_is_refused(self):
+        with self.assertRaises(ValueError):
+            Footprint(0.22, 0.22, 0.185, nose_m=0.2, nose_half_width_m=0.30)
+
+
 class TestFootprintAndMasks(unittest.TestCase):
     def test_clearance(self):
         fp = Footprint(0.25, 0.20, 0.15)
