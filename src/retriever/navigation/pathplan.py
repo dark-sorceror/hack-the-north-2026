@@ -100,8 +100,15 @@ class Costmap:
         return self.inside(ix, iy) and bool(self.lethal[iy, ix])
 
 
-def build_costmap(grid: OccupancyGrid, config: PlannerConfig = PlannerConfig()) -> Costmap:
+def build_costmap(grid: OccupancyGrid, config: PlannerConfig = PlannerConfig(),
+                  extra_occupied: np.ndarray | None = None) -> Costmap:
+    """extra_occupied: cells another sensor says are blocked (the camera layer:
+    navigator.Mapper). They inflate exactly as the lidar's do, so a route round
+    a camera-only obstacle keeps the same clearance as one round a chair. They
+    are never 'seen free': a camera can only make the robot more careful."""
     occ = grid.occupied()
+    if extra_occupied is not None:
+        occ = occ | extra_occupied
     reach = config.lethal_m + config.cost_band_m
     max_cells = int(math.ceil(reach / grid.res)) + 2
     dist_fine = distance_field(occ, max_cells) * grid.res

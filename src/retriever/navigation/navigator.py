@@ -42,6 +42,8 @@ from retriever.navigation.pathplan import Costmap, PathResult, PlannerConfig, bu
 from retriever.types import Action, Observation, Pose
 
 LETHAL_ZONE = 3   # page_view(): free cell the robot's centre may not enter
+CAMERA = 4        # page_view(): blocked by the camera, not the lidar
+CAMERA_HOLD_S = 2.0   # a camera cell blocks for this long after it was last seen
 
 
 class Mapper:
@@ -62,6 +64,13 @@ class Mapper:
         self._view_at = -math.inf
         self.scans = 0
         self.last_scan: float | None = None       # clock() of the last scan added
+        # The camera layer: cell -> when it stops blocking. Kept apart from the
+        # lidar's grid because the lidar clears every cell its beams cross, and a
+        # box below its plane is exactly what they cross: written into the grid,
+        # camera marks would be erased by the next revolution.
+        self._camera: dict[int, float] = {}
+        self.camera_points = 0
+        self.last_camera: float | None = None
 
     def add_scan(self, pose: Pose, points_base: Iterable[Sequence[float]]) -> int:
         with self._lock:
@@ -70,19 +79,64 @@ class Mapper:
             self.last_scan = self.clock()
             return n
 
+    def add_camera_points(self, pose: Pose, points_base: Iterable[Sequence[float]],
+                          hold_s: float = CAMERA_HOLD_S) -> int:
+        """Obstacle points a camera saw (base frame, from the pose it was taken
+        at). They block for hold_s and then stop, so someone who walks away
+        stops blocking; seeing them again refreshes them."""
+        pts = [(float(p[0]), float(p[1])) for p in points_base]
+        with self._lock:
+            now = self.clock()
+            g = self.grid
+            c, s = math.cos(pose.theta), math.sin(pose.theta)
+            until = now + hold_s
+            for bx, by in pts:
+                x, y = pose.x + bx * c - by * s, pose.y + bx * s + by * c
+                ix, iy = g.cell(x, y)
+                if g.inside(ix, iy):
+                    self._camera[int(iy) * g.n + int(ix)] = until
+            self.camera_points = len(pts)
+            self.last_camera = now
+            self._costmap = None                  # the costmap is stale now
+            return len(pts)
+
+    def camera_mask(self) -> np.ndarray | None:
+        """The camera cells that still block, or None if there are none."""
+        with self._lock:
+            now = self.clock()
+            live = [k for k, until in self._camera.items() if until > now]
+            if len(live) != len(self._camera):
+                self._camera = {k: self._camera[k] for k in live}
+                self._costmap = None
+            if not live:
+                return None
+            mask = np.zeros(self.grid.n * self.grid.n, bool)
+            mask[np.fromiter(live, dtype=np.int64, count=len(live))] = True
+            return mask.reshape(self.grid.n, self.grid.n)
+
+    def has_map(self) -> bool:
+        """Anything to plan on at all: lidar scans, or live camera points."""
+        with self._lock:
+            return bool(self.scans) or any(u > self.clock() for u in self._camera.values())
+
     def scan_age(self) -> float:
         return math.inf if self.last_scan is None else self.clock() - self.last_scan
+
+    def camera_age(self) -> float:
+        return math.inf if self.last_camera is None else self.clock() - self.last_camera
 
     def reset(self) -> None:
         with self._lock:
             self.grid.clear()
             self._costmap = None
             self.scans = 0
+            self._camera.clear()
 
     def costmap(self) -> Costmap:
+        camera = self.camera_mask()               # also expires old cells
         with self._lock:
             if self._costmap is None or self._costmap.version != self.grid.version:
-                self._costmap = build_costmap(self.grid, self.config)
+                self._costmap = build_costmap(self.grid, self.config, camera)
             return self._costmap
 
     def plan(self, start: tuple[float, float], goal: tuple[float, float]) -> PathResult:
@@ -102,6 +156,9 @@ class Mapper:
             cm = self.costmap()
             if cm.fine_lethal is not None:
                 states[(states != OCCUPIED) & cm.fine_lethal] = LETHAL_ZONE
+            camera = self.camera_mask()
+            if camera is not None:
+                states[camera] = CAMERA
             known = states != 0
             if not known.any():
                 return None
