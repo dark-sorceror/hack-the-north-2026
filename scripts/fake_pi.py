@@ -90,9 +90,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="metres. The default is a placeholder: MEASURE the tyre (diameter/2)")
     parser.add_argument("--track-width", type=float, default=defaults.track_width_m)
     parser.add_argument("--scrub-factor", type=float, default=defaults.scrub_factor)
-    parser.add_argument("--imu", choices=("auto", "d435i", "none"), default="auto",
-                        help="gyro heading for the laptop's odometry: the D435i's IMU over raw "
-                             "HID (auto: when the camera is plugged in; d435i: required)")
+    parser.add_argument("--imu", choices=("auto", "mpu", "d435i", "none"), default="auto",
+                        help="gyro heading for the laptop's odometry: an MPU-6050/9250 on the "
+                             "Pi's I2C, or the D435i's IMU over raw HID (auto: the MPU if it "
+                             "answers, else the camera; naming one makes it required)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     # Lidar safety bubble: all off unless --lidar-port or --fake-lidar is given.
     add_lidar_args(parser)
@@ -153,21 +154,38 @@ def main(argv: list[str] | None = None) -> int:
         geo = TankGeometry(args.wheel_radius, args.track_width, args.scrub_factor)
         driver = build_driver(args, geo, relay)
         lidar, bubble = lidar_from_args(args, driver)   # (None, None) unless asked for
-        # The D435i's gyro: heading that ignores the skid-steer's wheel slip (bridge/imu.py).
+        # A gyro gives heading that ignores the skid-steer's wheel slip: the robot's
+        # own MPU-6050/9250 (bridge/mpu.py), or the camera's IMU (bridge/imu.py).
         if args.imu != "none":
-            from retriever.bridge.imu import D435iImu, find_hidraw
+            if args.imu in ("auto", "mpu"):
+                from retriever.bridge.mpu import MpuImu
 
-            try:
-                if args.imu == "d435i" or find_hidraw() is not None:
-                    imu = D435iImu().start()
-                    logger.info("gyro: D435i IMU on %s (heading for the laptop's odometry)",
-                                imu.path)
-            except Exception as exc:  # no camera, no permission: the wheels still do heading
-                if args.imu == "d435i":
-                    print(f"\n  {exc}\n", file=sys.stderr)
-                    _close(lidar, relay, button)
-                    return 2
-                logger.warning("gyro: not used (%s)", exc)
+                try:
+                    imu = MpuImu().start()
+                    logger.info("gyro: %s at 0x%02x on %s (heading for the laptop's odometry)",
+                                imu.part, imu.address, imu.bus)
+                except Exception as exc:
+                    if args.imu == "mpu":
+                        print(f"\n  {exc}\n", file=sys.stderr)
+                        _close(lidar, relay, button)
+                        return 2
+                    logger.info("gyro: no MPU on I2C (%s); trying the camera's", exc)
+            if imu is None and args.imu in ("auto", "d435i"):
+                from retriever.bridge.imu import D435iImu, find_hidraw
+
+                try:
+                    if args.imu == "d435i" or find_hidraw() is not None:
+                        imu = D435iImu().start()
+                        logger.info("gyro: D435i IMU on %s (heading for the laptop's odometry)",
+                                    imu.path)
+                except Exception as exc:  # no camera, no permission: the wheels still do heading
+                    if args.imu == "d435i":
+                        print(f"\n  {exc}\n", file=sys.stderr)
+                        _close(lidar, relay, button)
+                        return 2
+                    logger.warning("gyro: not used (%s)", exc)
+            if imu is None:
+                logger.warning("gyro: none found; heading falls back to the wheels, which slip")
         server = BridgeServer(
             driver,
             args.host,
