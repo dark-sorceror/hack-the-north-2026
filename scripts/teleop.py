@@ -75,6 +75,10 @@ def main() -> int:
                          "(overrides the Pi's until its bridge runs with --scrub-factor too)")
     ap.add_argument("--footprint", default="0.25,0.25,0.20",
                     help="front,rear,half-width in m, for drawing the robot")
+    ap.add_argument("--camera", default="auto", metavar="URL",
+                    help="MJPEG stream to show on the page. 'auto' (default) points at the "
+                         "robot Pi's port 8790, where scripts/cam_stream.py serves it; "
+                         "'off' hides the panel")
     ap.add_argument("--no-open", action="store_true", help="don't open a browser tab")
     args = ap.parse_args()
 
@@ -112,7 +116,16 @@ def main() -> int:
                     "journalctl -u retriever-bridge -n 5") from None
             raise
 
-    session = TeleopSession(connect, config, recorder, footprint=footprint).start()
+    camera_url: str | None
+    if args.camera == "off" or (args.camera == "auto" and not args.bridge):
+        camera_url = None                      # a sim has no camera to show
+    elif args.camera == "auto":
+        camera_url = f"http://{args.bridge.split(':')[0]}:8790/stream.mjpg"
+    else:
+        camera_url = args.camera
+
+    session = TeleopSession(connect, config, recorder, footprint=footprint,
+                            camera_url=camera_url).start()
     try:
         httpd = serve(session, args.listen, args.port)
     except OSError as exc:

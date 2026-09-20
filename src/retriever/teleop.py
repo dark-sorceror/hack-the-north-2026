@@ -293,6 +293,7 @@ class TeleopSession:
         footprint: tuple[float, float, float] = (0.25, 0.25, 0.20),
         mapping: bool = True,
         camera: Any = None,
+        camera_url: str | None = None,
     ) -> None:
         """mapping: build a map from the lidar's scans (needs numpy), and plan
         click-to-go routes over it. Off, or no numpy: avoid.py steering only.
@@ -320,6 +321,7 @@ class TeleopSession:
         self.map_skipped = 0                   # scans left out: taken mid-turn
         self.camera = camera
         self._camera_t: float | None = None
+        self.camera_url = camera_url      # an MJPEG stream for the page (cam_stream.py)
         self._last_cmd = Action()
         self._threads: list[threading.Thread] = []
         self._obs: Any = None                  # the latest Observation, for click-to-go
@@ -928,6 +930,7 @@ class TeleopSession:
             "slip_pct": (round(100.0 * (odo.turn_wheels_rad / gyro_turn - 1.0), 1)
                          if gyro_turn > math.radians(90) else None),
         }
+        snap["camera_url"] = self.camera_url
         snap["estop"] = bool(robot is not None and robot.estopped)
         snap["watchdog"] = bool(robot is not None and robot.watchdog_tripped)
         bubble = getattr(robot, "bubble", None) if robot is not None else None
