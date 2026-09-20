@@ -21,8 +21,10 @@ if HAVE_NUMPY:
     import numpy as np
 
 from retriever.perception.depth_obstacles import (
+    DEFAULT_MOUNT,
     CameraObstacleSource,
     calibrate,
+    check,
     depth_camera_intrinsics,
     fit_floor,
     grid_intrinsics,
@@ -298,6 +300,64 @@ class TestCameraObstacleSource(unittest.TestCase):
     def test_calibrate_times_out_without_a_stream(self):
         with self.assertRaises(TimeoutError):
             calibrate(StubRemote(camstream_header(), None), timeout_s=0.05, poll_s=0.01)
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed")
+class TestCheck(unittest.TestCase):
+    """The preflight a hardware test starts with: it must name the real failure,
+    not just fail. Every case here has happened at least once."""
+
+    def run_check(self, remote, mount=MOUNT):
+        return check(CameraObstacleSource(remote, mount), seconds=0.03, poll_s=0.005)
+
+    def packet(self, depth):
+        return StubFrame(grid_message(depth), received_at=time.monotonic())
+
+    def test_a_working_stream_is_ready_and_says_what_it_sees(self):
+        box = (1.0, 1.3, -0.15, 0.15, 0.0, 0.25)
+        ready, lines = self.run_check(
+            StubRemote(camstream_header(), self.packet(render(MOUNT, [box]))))
+        text = "\n".join(lines)
+        self.assertTrue(ready, text)
+        self.assertIn("READY", lines[-1])
+        self.assertNotIn("!!", text)
+        self.assertIn("obstacle points", text)
+        self.assertIn("cells", text)
+
+    def test_nothing_publishing_says_so_first(self):
+        ready, lines = self.run_check(StubRemote(None, None))
+        self.assertFalse(ready)
+        self.assertIn("no header", lines[0])
+        self.assertIn("depth publisher", lines[0])
+
+    def test_a_detection_stream_is_named_as_the_wrong_publisher(self):
+        header = {"type": "header", "frame_w": W, "frame_h": H,
+                  "camera": "rdk", "detector": "yolo11n", "intrinsics": None}
+        with self.assertLogs("retriever.perception.depth_obstacles", "WARNING"):
+            ready, lines = self.run_check(StubRemote(header, self.packet(render(MOUNT))))
+        text = "\n".join(lines)
+        self.assertFalse(ready)
+        self.assertIn("not the depth publisher", text)
+        self.assertIn("NOT READY", lines[-1])
+
+    def test_a_silent_publisher_is_distinguished_from_a_missing_one(self):
+        ready, lines = self.run_check(StubRemote(camstream_header(), None))
+        text = "\n".join(lines)
+        self.assertFalse(ready)
+        self.assertIn("reachable but silent", text)
+
+    def test_an_empty_grid_is_called_out(self):
+        ready, lines = self.run_check(
+            StubRemote(camstream_header(), self.packet(np.zeros((H, W), np.float32))))
+        self.assertFalse(ready)
+        self.assertIn("almost no valid cells", "\n".join(lines))
+
+    def test_a_placeholder_mount_is_flagged_but_does_not_block(self):
+        ready, lines = self.run_check(
+            StubRemote(camstream_header(), self.packet(render(DEFAULT_MOUNT))), DEFAULT_MOUNT)
+        text = "\n".join(lines)
+        self.assertTrue(ready, text)
+        self.assertIn("still the placeholders", text)
 
 
 if __name__ == "__main__":
