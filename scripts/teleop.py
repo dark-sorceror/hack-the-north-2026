@@ -75,6 +75,10 @@ def main() -> int:
                          "(overrides the Pi's until its bridge runs with --scrub-factor too)")
     ap.add_argument("--footprint", default="0.25,0.25,0.20",
                     help="front,rear,half-width in m, for drawing the robot")
+    ap.add_argument("--map-min-range", type=float, default=0.45, metavar="M",
+                    help="lidar returns closer than this to the robot's centre never reach "
+                         "the map (default 0.45: the arm reaches 0.42, so anything nearer is "
+                         "the robot itself). The Pi's safety bubble still sees them")
     ap.add_argument("--camera", default="auto", metavar="URL",
                     help="MJPEG stream to show on the page. 'auto' (default) points at the "
                          "robot Pi's port 8790, where scripts/cam_stream.py serves it; "
@@ -125,7 +129,8 @@ def main() -> int:
         camera_url = args.camera
 
     session = TeleopSession(connect, config, recorder, footprint=footprint,
-                            camera_url=camera_url).start()
+                            camera_url=camera_url,
+                            map_min_range_m=args.map_min_range).start()
     try:
         httpd = serve(session, args.listen, args.port)
     except OSError as exc:
