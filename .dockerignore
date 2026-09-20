@@ -1,5 +1,0 @@
-*
-!pyproject.toml
-!robot_app/
-!robot_app/**
-robot_app/**/__pycache__/

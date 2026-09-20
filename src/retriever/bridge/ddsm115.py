@@ -30,7 +30,7 @@ try:
 except ImportError:  # retriever: the only change from the teammate's file (see docstring)
     class _NoPyserial:
         def __getattr__(self, name):
-            raise ImportError("pyserial is not installed: on the Pi, nav-pi/setup.sh "
+            raise ImportError("pyserial is not installed: on the Pi, hardware/nav_pi/setup.sh "
                               "installs it (python3-serial); elsewhere, pip install pyserial")
     serial = list_ports = _NoPyserial()
 

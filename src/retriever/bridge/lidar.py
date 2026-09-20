@@ -55,7 +55,7 @@ D = datasheet/protocol/SDK source, not yet seen on our hardware):
      closer than 0.2 m to the lidar is invisible.
   D  Scan rate 5-15 Hz, 10 Hz typical [DS]. Speed at MOTOCTL DC high:
      "highest speed", number not given [DS]. UNVERIFIED: measure it with
-     scripts/lidar_check.py.
+     tools/diagnostics/lidar_check.py.
   D  The dense modes cannot use standard packets at 256000 baud: 15873
      samples/s fits the link (25.6 kB/s) only as ultra-capsules (132 bytes per
      96 samples, 0x84 [SDK sl_lidar_cmd.h]). Not implemented here.
@@ -447,7 +447,7 @@ class LidarMount:
 
     yaw_rad is the base-frame bearing of the lidar's 0 mark (the side away from
     its cable). Cable pointing at the robot's rear: yaw 0. Measure it rather
-    than trusting a drawing: scripts/lidar_check.py --find-front.
+    than trusting a drawing: tools/diagnostics/lidar_check.py --find-front.
     inverted: mounted upside down (e.g. hanging under the chassis), which
     mirrors the sweep. With raw RPLIDAR degrees (clockwise):
         upright   bearing_base = yaw - raw
@@ -709,7 +709,7 @@ def default_motor(port: str, pin: int | str | None = None,
 
 class RPLidarLink:
     """The protocol over one serial port. Synchronous and BLOCKING: the bridge
-    uses it only from RPLidar's thread; scripts/lidar_check.py uses it directly.
+    uses it only from RPLidar's thread; tools/diagnostics/lidar_check.py uses it directly.
 
     Standard SCAN only. Express/boost modes would give 4-16x the points but
     need capsule decoding plus GET_LIDAR_CONF to learn which capsule format the

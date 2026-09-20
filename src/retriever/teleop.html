@@ -113,7 +113,7 @@
     <div id="cambox">
       <img id="cam" alt="">
       <div id="camoff" class="k">camera off &middot; on the Pi:
-        <code>python3 scripts/cam_stream.py</code></div>
+        <code>python3 scripts/camera_stream.py</code></div>
     </div>
   </aside>
 </main>
@@ -392,7 +392,7 @@ cv.addEventListener('wheel', e => {                  // scroll the map to zoom
   setSpan(span * (e.deltaY > 0 ? 1.1 : 1 / 1.1));
 }, {passive: false});
 
-// The camera streams straight from the Pi (scripts/cam_stream.py), not through
+// The camera streams straight from the Pi (scripts/camera_stream.py), not through
 // this page's server: an MJPEG <img> is its own connection, so a dead camera
 // costs the dashboard nothing.
 function showCamera(url) {
@@ -404,7 +404,7 @@ function showCamera(url) {
   img.onerror = () => {
     img.classList.remove('on');
     off.style.display = 'flex';
-    off.innerHTML = 'camera not answering &middot; on the Pi: <code>python3 scripts/cam_stream.py</code>';
+    off.innerHTML = 'camera not answering &middot; on the Pi: <code>python3 scripts/camera_stream.py</code>';
     setTimeout(() => { if (img.dataset.src === url) img.src = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(); }, 5000);
   };
   img.src = url;
@@ -432,7 +432,7 @@ function paintArm(a) {
   if (!p || !h) return;
   if (!a || !a.configured) {
     p.textContent = '\u270B no arm configured'; p.disabled = true;
-    h.textContent = '\u1F91D no arm configured'; h.disabled = true;
+    h.textContent = '\u{1F91D} no arm configured'; h.disabled = true;
     return;
   }
   const busy = !!a.busy;
@@ -440,10 +440,10 @@ function paintArm(a) {
   p.dataset.busy = h.dataset.busy = busy ? '1' : '0';
   if (busy) {
     p.textContent = '\u270B ' + (a.detail || 'working...');
-    h.textContent = '\u1F91D ' + (a.detail || 'working...');
+    h.textContent = '\u{1F91D} ' + (a.detail || 'working...');
   } else {
     p.textContent = '\u270B grab it (G)' + (a.detail ? ' \u2014 ' + a.detail : '');
-    h.textContent = '\u1F91D hand it over (B)';
+    h.textContent = '\u{1F91D} hand it over (B)';
   }
 }
 
@@ -514,7 +514,7 @@ function paintCalib(s) {
     out.innerHTML = `The wheels said <b>${r.odometry_deg.toFixed(0)}°</b> for a true ${r.true_deg.toFixed(0)}° `
       + `(${r.error_pct > 0 ? '+' : ''}${r.error_pct}%). Turn-slip factor: <b>${f}</b> (was ${r.scrub_was}).<br>`
       + `Use it now: restart teleop with <code>--scrub-factor ${f}</code><br>`
-      + `Keep it: on the Pi, run the bridge (scripts/fake_pi.py) with <code>--scrub-factor ${f}</code>`;
+      + `Keep it: on the Pi, run the bridge (scripts/run_bridge.py) with <code>--scrub-factor ${f}</code>`;
   } else out.innerHTML = using;
 }
 function connect() {

@@ -124,14 +124,14 @@ the bugs that matter.
 
 ```bash
 # on the Pi (one command turns a fresh Pi into a robot that boots into the bridge)
-bash nav-pi/setup.sh --driver real --imu mpu --lidar-port /dev/ttyAMA0
+bash hardware/nav_pi/setup.sh --driver real --imu mpu --lidar-port /dev/ttyAMA0
 
 # on the laptop
 python3 scripts/teleop.py --bridge hao.local:7777
 ```
 
-`scripts/pi_doctor.sh` says in plain language why the Pi can't be reached.
-`scripts/link_test.py` measures whether the 300 ms watchdog survives your network.
+`tools/diagnostics/pi_doctor.sh` says in plain language why the Pi can't be reached.
+`tools/diagnostics/link_test.py` measures whether the 300 ms watchdog survives your network.
 </details>
 
 ---
@@ -322,7 +322,7 @@ src/retriever/
     identity.py        DINOv2 + hue margin gate — "is this *yours*?"
   planner/  skills/  voice/            the language side
 scripts/         teleop · depth_publisher · wheel_check · link_test · pi_doctor
-nav-pi/          setup.sh — one command from a fresh Pi to a robot that boots into the bridge
+hardware/nav_pi/          setup.sh — one command from a fresh Pi to a robot that boots into the bridge
 tests/           903 tests, incl. a subset that runs on the Pi's own Python
 ```
 

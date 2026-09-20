@@ -1,4 +1,4 @@
-"""DDSM115Driver, DDSM115Bus, the vendored ddsm115 frames, and scripts/wheel_check.py.
+"""DDSM115Driver, DDSM115Bus, the vendored ddsm115 frames, and tools/diagnostics/wheel_check.py.
 
 No hardware and no pyserial. FakeRS485 is a USB-RS485 port with DDSM115 motors
 behind it, at the BYTE level: it checks every frame's CRC, answers 0x64 and
@@ -292,7 +292,7 @@ class TestHelpers(unittest.TestCase):
         for call in (lambda: find_wheel_port({}), lambda: DDSM115Bus.open("/dev/null")):
             with self.assertRaises(ImportError) as ctx:
                 call()
-            self.assertIn("nav-pi/setup.sh", str(ctx.exception))
+            self.assertIn("hardware/nav_pi/setup.sh", str(ctx.exception))
 
 
 # ---------------------------------------------------------------- start-up
@@ -757,11 +757,11 @@ class TestBuildRealDriver(unittest.TestCase):
         cls.return_value.close.assert_called_once()
 
 
-# ---------------------------------------------------------------- scripts/wheel_check.py
+# ---------------------------------------------------------------- tools/diagnostics/wheel_check.py
 
 
 def load_wheel_check():
-    path = ROOT / "scripts" / "wheel_check.py"
+    path = ROOT / "tools" / "diagnostics" / "wheel_check.py"
     spec = importlib.util.spec_from_file_location("wheel_check", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -810,7 +810,7 @@ class TestWheelCheck(unittest.TestCase):
     def test_without_pyserial_it_says_how_to_install_it(self):
         out = io.StringIO()
         self.assertEqual(self.mod.main(["scan"], out=out), 1)
-        self.assertIn("nav-pi/setup.sh", out.getvalue())
+        self.assertIn("hardware/nav_pi/setup.sh", out.getvalue())
 
     def test_everything_that_spins_refuses_without_yes(self):
         for argv in (("spin", "1"), ("sides",), ("rev", "1")):

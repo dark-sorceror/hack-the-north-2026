@@ -58,7 +58,7 @@ THE RULES
    mount, the chassis behind a front mount, the arm, a mast) are masked by
    sensor angle: a LIST of intervals, e.g. four wheel sectors.
    propose_mask() proposes it from scans recorded with nothing around
-   (scripts/lidar_check.py --record-mask). A masked sector is BLIND, not free:
+   (tools/diagnostics/lidar_check.py --record-mask). A masked sector is BLIND, not free:
    see rule 6. Returns closer than min_range_m to the lidar are ignored too:
    the A2M12 cannot range below 0.2 m [DS], so anything that close is
    invisible, masked or not.
@@ -721,7 +721,7 @@ def _direction(vx: float, wz: float) -> str:
 
 
 def add_lidar_args(ap: argparse.ArgumentParser) -> None:
-    """The bridge's lidar + bubble flags. scripts/fake_pi.py calls this."""
+    """The bridge's lidar + bubble flags. scripts/run_bridge.py calls this."""
     g = ap.add_argument_group(
         "lidar safety bubble (RPLIDAR A2M12; off unless a lidar is given)")
     g.add_argument("--lidar-port", default=None,
@@ -747,7 +747,7 @@ def add_lidar_args(ap: argparse.ArgumentParser) -> None:
                    action="store_true", help="lidar mounted upside down (mirrors the sweep)")
     g.add_argument("--lidar-mask", default="",
                    help="blind sectors, lidar-frame degrees CCW, e.g. '100:140,350:10' "
-                        "(scripts/lidar_check.py --record-mask prints this)")
+                        "(tools/diagnostics/lidar_check.py --record-mask prints this)")
     g.add_argument("--nose", default=None, metavar="LEN,HALF_WIDTH",
                    help="an arm reaching past the footprint's front, in m, e.g. '0.20,0.06'. "
                         "Swept as a narrow nose rather than a full-width slab, so curves are "

@@ -1,4 +1,4 @@
-"""The arm's stop path: SO-101/scripts/fetch.py under SIGTERM/SIGINT.
+"""The arm's stop path: hardware/so101/scripts/fetch.py under SIGTERM/SIGINT.
 
 No hardware and no lerobot here. `fetch.py` imports torch and a *forked*
 lerobot that only exists on the arm board (ARM_BOARD.md §2), so this module
@@ -32,8 +32,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FETCH = ROOT / "SO-101" / "scripts" / "fetch.py"
-ARM_BOARD = ROOT / "SO-101" / "ARM_BOARD.md"
+FETCH = ROOT / "hardware" / "so101" / "scripts" / "fetch.py"
+ARM_BOARD = ROOT / "hardware" / "so101" / "ARM_BOARD.md"
 
 # Every name fetch.py imports at module scope, and the one attribute it uses
 # from each. Stubbing rather than installing lerobot: the board's copy is a

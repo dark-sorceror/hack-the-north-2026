@@ -3,17 +3,18 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "retriever"
+name = "goosetriever"
 version = "0.1.0"
-description = "A robot that finds things, decides what to do with them, and acts"
+description = "Goosetriever: multimodal interaction, navigation and robotic retrieval"
 requires-python = ">=3.10"
-# The core, the Pi bridge and the navigation stack are stdlib-only by design.
+# The bridge core is stdlib-only; optional groups cover laptop workloads.
 dependencies = []
 
 [project.optional-dependencies]
-audio = ["sounddevice>=0.5,<0.6"]
+audio = ["numpy>=2,<3", "sounddevice>=0.5,<0.6", "soundfile>=0.12,<1"]
 camera = ["numpy>=2,<3", "pillow>=10,<13"]
 camera-realsense = ["pyrealsense2>=2.56"]
+perception = ["numpy>=2,<3", "opencv-python>=4.10,<5", "ultralytics>=8.3,<9"]
 test = ["pytest>=8,<10"]
 
 [tool.setuptools.packages.find]
@@ -26,3 +27,6 @@ target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+retriever = ["teleop.html"]

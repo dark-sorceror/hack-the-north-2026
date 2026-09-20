@@ -438,7 +438,7 @@ def _connect(host: str, port: int, timeout_s: float, where: str) -> socket.socke
     except ConnectionRefusedError as exc:
         raise BridgeError(
             f"connection refused by {where}: the machine is up but nothing is listening on "
-            f"port {port}; is the bridge (scripts/fake_pi.py) running there?"
+            f"port {port}; is the bridge (scripts/run_bridge.py) running there?"
         ) from exc
     except TimeoutError as exc:
         raise BridgeError(

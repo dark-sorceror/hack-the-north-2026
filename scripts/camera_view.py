@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from floor_detector import (D435I_HFOV_DEG, DepthStreamFrames, GOOSE_ALIASES,
+from retriever.perception.floor import (D435I_HFOV_DEG, DepthStreamFrames, GOOSE_ALIASES,
                             floor_point, intrinsics_for, parse_mount)
 
 LOG = logging.getLogger("view")

@@ -155,7 +155,7 @@ class VacuumRelay:
 class VacuumOverlay:
     """Any HardwareDriver, with set_vacuum also driving a real relay.
 
-    For running FakeTankDriver on a real Pi with a real relay (scripts/fake_pi.py
+    For running FakeTankDriver on a real Pi with a real relay (scripts/run_bridge.py
     --vacuum-pin). The real stack uses CompositeDriver(vacuum=relay) instead.
     stop() is the inner driver's alone: the vacuum is left as it is.
     """

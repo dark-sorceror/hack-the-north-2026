@@ -7,7 +7,7 @@
 
 On the Pi, the bridge with the real wheels:
 
-    python3 scripts/fake_pi.py --driver real --wheel-port /dev/serial/by-id/<RS485 adapter>
+    python3 scripts/run_bridge.py --driver real --wheel-port /dev/serial/by-id/<RS485 adapter>
 
 Opens http://localhost:8791. Hold keys to drive, let go to stop; the page
 lists the rest. Gear 1 (0.15 m/s) is the default, for the first time the real
@@ -85,7 +85,7 @@ def main() -> int:
                          "the page drawing the arm as if it were bodywork")
     ap.add_argument("--camera", default="auto", metavar="URL",
                     help="MJPEG stream to show on the page. 'auto' (default) points at the "
-                         "robot Pi's port 8790, where scripts/cam_stream.py serves it; "
+                         "robot Pi's port 8790, where scripts/camera_stream.py serves it; "
                          "'off' hides the panel")
     ap.add_argument("--clearance", type=float, default=0.02, metavar="M",
                     help="metres the route keeps clear PAST the body (default 0.02). The "

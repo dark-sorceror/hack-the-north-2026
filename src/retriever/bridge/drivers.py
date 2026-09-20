@@ -14,7 +14,7 @@ afterwards so the failure is still heard.
                    bridge/ddsm115.py). Unit-tested against a byte-level fake
                    bus, and driven on the robot: the mirrored IDs and the
                    position sign are measured there. counts_per_rev and the
-                   wheel radius are still unverified: scripts/wheel_check.py
+                   wheel radius are still unverified: tools/diagnostics/wheel_check.py
                    checks them.
 
 Import cost: this module stays stdlib-only at import time. The device libraries
@@ -113,7 +113,7 @@ class VacuumDriver(Protocol):
 # reply's position as 16 bits without restating its range; Waveshare's own library
 # decodes it as (data[6] << 8) | data[7]. So one wheel turn = 32768 counts -- the
 # encoder itself is 4096 counts/rev (wiki spec table), so it moves in steps of 8.
-# CONFIRM ON HARDWARE: `scripts/wheel_check.py rev ID` turns one wheel exactly this
+# CONFIRM ON HARDWARE: `tools/diagnostics/wheel_check.py rev ID` turns one wheel exactly this
 # many counts and asks whether the tape mark came back to its start. A position
 # >= counts_per_rev is caught at runtime and refuses odometry.
 DDSM115_COUNTS_PER_REV = 32768
@@ -135,7 +135,7 @@ DDSM115_ERROR_BITS = ((0x01, "sensor"), (0x02, "overcurrent"),
 # Replaces the vendored module's own ImportError, which names an offline wheel
 # this repository does not ship.
 PYSERIAL_MISSING = ("pyserial is not installed, and the DDSM115 wheels need it: on the Pi, "
-                    "nav-pi/setup.sh installs it (python3-serial); elsewhere, pip install pyserial")
+                    "hardware/nav_pi/setup.sh installs it (python3-serial); elsewhere, pip install pyserial")
 
 
 def _ddsm115() -> Any:
@@ -331,7 +331,7 @@ class DDSM115Driver:
     Speaks the motors' own protocol through a USB-RS485 adapter, with the frame,
     CRC and parse functions of the teammate's known-working ddsm115.py.
 
-    Conventions (defaults UNVERIFIED on the robot; scripts/wheel_check.py sides):
+    Conventions (defaults UNVERIFIED on the robot; tools/diagnostics/wheel_check.py sides):
       left_ids / right_ids   (1, 2) / (3, 4).
       flipped_ids            ROBOT_FLIPPED_IDS = (1, 2), measured: mirror-mounted
                              motors, so they get -rpm and +rpm is robot-forward
@@ -499,14 +499,14 @@ class DDSM115Driver:
         self._refuse_if_unsafe(f"wheel bus {self.port} not usable")
         logger.info("DDSM115 wheels on %s: left %s, right %s, flipped %s, %d counts/rev, wheel "
                     "radius %.4f m (IDs, direction, counts/rev and radius: confirm with "
-                    "scripts/wheel_check.py)", self.port, list(self.left_ids),
+                    "tools/diagnostics/wheel_check.py)", self.port, list(self.left_ids),
                     list(self.right_ids), sorted(self.flipped_ids), self.counts_per_rev,
                     self.geo.wheel_radius_m)
 
     def _missing_message(self, silent: list[_Motor]) -> str:
         who = ", ".join(f"{m.id} ({m.why})" for m in silent)
         return (f"no reply from wheel motor(s) {who} on {self.port}. Check the motors' "
-                "power, the RS485 A/B wiring, and the IDs with `scripts/wheel_check.py "
+                "power, the RS485 A/B wiring, and the IDs with `tools/diagnostics/wheel_check.py "
                 "scan`; set --left-ids/--right-ids to match.")
 
     # -- the one round of I/O ---------------------------------------------
@@ -586,7 +586,7 @@ class DDSM115Driver:
                 self._fault = (
                     f"wheel motor {m.id} reported position {pos}, but counts_per_rev is "
                     f"{self.counts_per_rev}, so every odometry distance would be wrong. "
-                    f"Measure it with `scripts/wheel_check.py rev {m.id} --yes` and pass "
+                    f"Measure it with `tools/diagnostics/wheel_check.py rev {m.id} --yes` and pass "
                     "--wheel-counts-per-rev.")
                 logger.error("%s", self._fault)
             return
@@ -854,12 +854,12 @@ def build_real_driver(
     wheel_counts_per_rev: int = DDSM115_COUNTS_PER_REV,
     wheel_reply_timeout_s: float = 0.010,
 ) -> CompositeDriver:
-    """What scripts/fake_pi.py --driver real constructs.
+    """What scripts/run_bridge.py --driver real constructs.
 
     wheel_port None: $DDSM115_PORT, else the one WCH USB adapter
     (find_wheel_port refuses to guess between two). left_ids, right_ids and
     flipped_ids (None: ROBOT_FLIPPED_IDS, measured) are unverified until
-    `scripts/wheel_check.py sides` says otherwise."""
+    `tools/diagnostics/wheel_check.py sides` says otherwise."""
     base = DDSM115Driver(wheel_port, geo=geo, left_ids=left_ids, right_ids=right_ids,
                          flipped_ids=flipped_ids, counts_per_rev=wheel_counts_per_rev,
                          reply_timeout_s=wheel_reply_timeout_s)

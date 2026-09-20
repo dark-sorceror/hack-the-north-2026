@@ -789,7 +789,7 @@ class BridgeRobotConnectTest(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]  # a port that was free a moment ago, and is again
-        with self.assertRaisesRegex(BridgeError, "refused.*fake_pi"):
+        with self.assertRaisesRegex(BridgeError, "refused.*run_bridge"):
             BridgeRobot("127.0.0.1", port, connect_timeout_s=1.0)
 
     def test_parse_address(self) -> None:
@@ -812,7 +812,7 @@ class BridgeRobotConnectTest(unittest.TestCase):
 
 
 class FakePiScriptTest(unittest.TestCase):
-    SCRIPT = SRC.parent / "scripts" / "fake_pi.py"
+    SCRIPT = SRC.parent / "scripts" / "run_bridge.py"
 
     def test_starts_answers_with_hello_and_stops_cleanly_on_sigint(self) -> None:
         proc = subprocess.Popen(
@@ -852,7 +852,7 @@ class FakePiScriptTest(unittest.TestCase):
         )
         self.assertEqual(out.returncode, 2)
         # no pyserial: how to install it; with pyserial: names the port it could not open
-        self.assertTrue("nav-pi/setup.sh" in out.stderr or port in out.stderr, out.stderr)
+        self.assertTrue("hardware/nav_pi/setup.sh" in out.stderr or port in out.stderr, out.stderr)
 
 
 class ImportTest(unittest.TestCase):

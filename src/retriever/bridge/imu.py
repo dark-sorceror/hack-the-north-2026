@@ -32,7 +32,7 @@ within seconds of every stop. Measured on the robot before this: a bias
 learned in the first quarter second, off by 7.5 deg/s, that the old
 "only learn when it reads under 1.7 deg/s" rule then locked in forever.
 
-Permissions: /dev/hidrawN is root-only by default. nav-pi/setup.sh installs a
+Permissions: /dev/hidrawN is root-only by default. hardware/nav_pi/setup.sh installs a
 udev rule for it (group plugdev); for a quick test, `sudo chmod 666 /dev/hidraw0`.
 """
 
@@ -239,7 +239,7 @@ class D435iImu:
             self._fd = os.open(path, os.O_RDWR)
         except PermissionError:
             raise PermissionError(
-                f"can't open {path}: run nav-pi/setup.sh (installs the udev rule), or for now "
+                f"can't open {path}: run hardware/nav_pi/setup.sh (installs the udev rule), or for now "
                 f"`sudo chmod 666 {path}`") from None
         self._feature(REPORT_ACCEL, POWER_ON, self.accel_hz)
         self._feature(REPORT_GYRO, POWER_ON, self.gyro_hz)

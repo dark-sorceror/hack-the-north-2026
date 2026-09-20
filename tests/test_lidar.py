@@ -646,7 +646,7 @@ class TestPiNeedsNoLibraries(unittest.TestCase):
 
 class TestLidarCheckScript(unittest.TestCase):
     def run_script(self, *args):
-        return subprocess.run([sys.executable, str(ROOT / "scripts" / "lidar_check.py"), *args],
+        return subprocess.run([sys.executable, str(ROOT / "tools" / "diagnostics" / "lidar_check.py"), *args],
                               capture_output=True, text=True, timeout=30)
 
     def test_fake_run_reports_sectors_and_the_front(self):

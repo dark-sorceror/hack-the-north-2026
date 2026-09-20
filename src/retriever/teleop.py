@@ -1253,16 +1253,16 @@ class ArmRunner:
             if self._busy:
                 raise RuntimeError("the arm is already moving")
             self._busy, self._detail = True, busy_text
-        threading.Thread(target=self._run, args=(cmd, ok_text), daemon=True,
+        threading.Thread(target=self._run, args=(cmd, ok_text, timeout_s), daemon=True,
                          name=f"arm-{name}").start()
         return {"started": True}
 
-    def _run(self, cmd: str, ok_text: str) -> None:
+    def _run(self, cmd: str, ok_text: str, timeout_s: float) -> None:
         import subprocess
         try:
             p = subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", self.target, cmd],
-                capture_output=True, text=True, timeout=self.timeout_s)
+                capture_output=True, text=True, timeout=timeout_s)
             tail = (p.stderr or p.stdout or "").strip().splitlines()
             detail = tail[-1][:160] if tail else ""
             detail = ok_text if p.returncode == 0 else (detail or "that didn't work")

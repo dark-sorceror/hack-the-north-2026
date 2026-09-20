@@ -4,7 +4,7 @@ Runs on the laptop, no Pi needed:
 
     .venv/bin/python -m unittest tests.test_pi_scripts -v
 
-scripts/pi_doctor.sh exists for the moment the Pi is NOT reachable, so the
+tools/diagnostics/pi_doctor.sh exists for the moment the Pi is NOT reachable, so the
 property that matters most is that it cannot hang there: it must reach a
 VERDICT inside its time cap against a name nobody answers for.
 """
@@ -23,11 +23,13 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCTOR = ROOT / "scripts" / "pi_doctor.sh"
-DEPLOY = ROOT / "scripts" / "pi_deploy.sh"
-SETUP = ROOT / "nav-pi" / "setup.sh"
-SERVICE = ROOT / "nav-pi" / "retriever-bridge.service"
-SHELL_FILES = sorted({*(ROOT / "scripts").glob("*.sh"), *(ROOT / "nav-pi").glob("*.sh")})
+DOCTOR = ROOT / "tools" / "diagnostics" / "pi_doctor.sh"
+DEPLOY = ROOT / "tools" / "deploy" / "nav_pi.sh"
+SETUP = ROOT / "hardware" / "nav_pi" / "setup.sh"
+SERVICE = ROOT / "hardware" / "nav_pi" / "retriever-bridge.service"
+SHELL_FILES = sorted({*(ROOT / "tools" / "deploy").glob("*.sh"),
+                      *(ROOT / "tools" / "diagnostics").glob("*.sh"),
+                      *(ROOT / "hardware" / "nav_pi").glob("*.sh")})
 BASH = shutil.which("bash")
 UNREACHABLE = "nonexistent-pi.local"
 
@@ -106,7 +108,7 @@ class TestServiceBind(unittest.TestCase):
             self.skipTest("could not bind IPv6 loopback here")
         host = self.host_arg(self.exec_start())
         proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "scripts" / "fake_pi.py"), f"--host={host}",
+            [sys.executable, str(ROOT / "scripts" / "run_bridge.py"), f"--host={host}",
              "--port", str(port), "--driver", "fake"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(_stop, proc)
@@ -233,7 +235,7 @@ class TestDeployLinkTest(unittest.TestCase):
     def test_against_a_real_local_bridge(self):
         port = _closed_port()
         proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "scripts" / "fake_pi.py"), "--host", "127.0.0.1",
+            [sys.executable, str(ROOT / "scripts" / "run_bridge.py"), "--host", "127.0.0.1",
              "--port", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(_stop, proc)
         _first_line("127.0.0.1", port, deadline=time.monotonic() + 10)
