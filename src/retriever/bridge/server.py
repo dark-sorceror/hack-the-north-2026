@@ -113,6 +113,7 @@ class BridgeCore:
         lidar: Any = None,
         bubble: Any = None,
         imu: Any = None,
+        power: Any = None,
     ) -> None:
         """lidar: a LidarSource (bridge/lidar.py) on the SAME clock as `now`;
         bubble: a SafetyBubble, default settings if None. No lidar, no bubble.
@@ -130,6 +131,7 @@ class BridgeCore:
             raise TypeError(f"{type(driver).__name__} does not implement HardwareDriver")
         self.driver = driver
         self.imu = imu
+        self.power = power          # bridge/power.PowerMonitor, or None
         if imu is not None and hasattr(imu, "wheels_still"):
             imu.wheels_still = lambda: self._wheels == (0.0, 0.0)
         self.estop_input = estop_input  # True while a physical e-stop is pressed
@@ -332,6 +334,10 @@ class BridgeCore:
                 yaw = None
             if yaw is not None and math.isfinite(yaw):
                 ext["yaw"] = round(float(yaw), 6)
+        if extended and self.power is not None and self.power.available:
+            ext["undervoltage"] = bool(self.power.undervoltage)
+            if self.power.volts is not None:
+                ext["volts"] = round(float(self.power.volts), 3)
         return State(
             seq=self.last_seq,
             t=now,
@@ -443,6 +449,7 @@ class BridgeServer:
         bubble: Any = None,
         scan_hz: float = 5.0,
         imu: Any = None,
+        power: Any = None,
     ) -> None:
         """estop_input: polled every tick (so at state_hz) and before every act;
         return True while a physical e-stop is pressed. Called on the loop
@@ -468,6 +475,7 @@ class BridgeServer:
             lidar=lidar,
             bubble=bubble,
             imu=imu,
+            power=power,
         )
         self._sub: Subscribe | None = None      # what the current client asked for
         self._scan_sent: Any = None
@@ -532,6 +540,11 @@ class BridgeServer:
                 self.core.imu.close()           # powers the gyro down
             except Exception as exc:
                 logger.error("gyro close failed: %s", exc)
+        if self.core.power is not None and hasattr(self.core.power, "close"):
+            try:
+                self.core.power.close()
+            except Exception as exc:
+                logger.error("power monitor close failed: %s", exc)
         logger.info("bridge closed; motors stopped")
 
     def trigger_estop(self, reason: str = "local estop") -> None:
