@@ -292,9 +292,14 @@ class TeleopSession:
         clock: Callable[[], float] = time.monotonic,
         footprint: tuple[float, float, float] = (0.25, 0.25, 0.20),
         mapping: bool = True,
+        camera: Any = None,
     ) -> None:
         """mapping: build a map from the lidar's scans (needs numpy), and plan
-        click-to-go routes over it. Off, or no numpy: avoid.py steering only."""
+        click-to-go routes over it. Off, or no numpy: avoid.py steering only.
+        camera: a perception CameraObstacleSource (latest() / age(), see
+        perception/depth_obstacles.py; perception/sim_camera.py stands in for
+        it). Its points go into the map's camera layer, which blocks but never
+        clears: routes go round what it sees, with or without a lidar."""
         self.connect = connect
         self.core = TeleopCore(config)
         self.recorder = recorder
@@ -313,6 +318,8 @@ class TeleopSession:
         self.mapper = (Mapper(planner_config=PlannerConfig.for_footprint(*footprint))
                        if mapping and Mapper is not None else None)
         self.map_skipped = 0                   # scans left out: taken mid-turn
+        self.camera = camera
+        self._camera_t: float | None = None
         self._last_cmd = Action()
         self._threads: list[threading.Thread] = []
         self._obs: Any = None                  # the latest Observation, for click-to-go
@@ -522,7 +529,7 @@ class TeleopSession:
                            (leg.straight == "auto" and least_turning_is_reverse(pose, leg.goal, leg.face)))
             leg.path = [here, (leg.goal.x, leg.goal.y)]
             if (math.dist(here, leg.path[1]) > 0.05 and lidar and self.mapper is not None
-                    and self.mapper.scans and not self._line_is_clear(here, leg.path[1])):
+                    and self.mapper.has_map() and not self._line_is_clear(here, leg.path[1])):
                 leg.path, leg.reverse = None, False  # something in the way: the planner, nose first
         if leg.path is not None and math.dist(leg.path[0], leg.path[-1]) <= 0.05:
             leg.path = None                         # already there: straight to the final turn
@@ -531,7 +538,7 @@ class TeleopSession:
         elif leg.path is not None:                    # a curve or a straight line: follow it
             a.ctl = PathTracker(leg.path, limits, reverse=leg.reverse)
             d = path_length(leg.path)
-        elif lidar and self.mapper is not None and self.mapper.scans:
+        elif lidar and self.mapper is not None and self.mapper.has_map():
             a.ctl = PathFollower(self.mapper, limits, FollowConfig(),
                                  bubble=lambda: getattr(robot, "bubble", None))
         elif lidar:
@@ -761,7 +768,7 @@ class TeleopSession:
             self._window.append((obs.t, p))
             while len(self._window) > 2 and obs.t - self._window[0][0] > 0.3:
                 self._window.popleft()
-            self._history.append((obs.t, p))
+            self._history.append((obs.t, p, now))   # bridge clock, pose, laptop clock
             while len(self._history) > 2 and obs.t - self._history[0][0] > 2.0:
                 self._history.popleft()
             t0, p0 = self._window[0]
@@ -776,6 +783,7 @@ class TeleopSession:
         if new_scan:
             self._seen.scan_t = scan.t
             self._map_scan(scan)
+        self._map_camera()
         if self.recorder is None:
             return
         state = getattr(robot, "state", None)
@@ -789,11 +797,36 @@ class TeleopSession:
             self.recorder.write("scan", t=round(scan.t, 4),
                                 pts=[[round(x, 3), round(y, 3)] for x, y, *_ in scan.points])
 
-    def _pose_at(self, t: float) -> tuple[Pose, float] | None:
-        """Odometry at bridge time t, interpolated, and the turn rate then.
-        None if t is outside the ~2 s of history."""
+    def _map_camera(self) -> None:
+        """One packet of camera obstacle points into the map's camera layer, at
+        the pose it was captured from. Their `t` is on THIS machine's clock."""
+        cam, mapper = self.camera, self.mapper
+        if cam is None or mapper is None:
+            return
+        try:
+            packet = cam.latest()
+        except Exception:                      # a broken stream must not stop odometry
+            return
+        if packet is None or packet.t == self._camera_t:
+            return
+        self._camera_t = packet.t
+        at = self._pose_at(packet.t, laptop_clock=True)
+        if at is None:
+            return
+        pose, wz = at
+        if abs(wz) > 1.5:                      # mid-spin: too smeared to place
+            return
+        try:
+            mapper.add_camera_points(pose, packet.points)
+        except Exception:
+            pass
+
+    def _pose_at(self, t: float, laptop_clock: bool = False) -> tuple[Pose, float] | None:
+        """Odometry at time t, interpolated, and the turn rate then. t is on the
+        bridge's clock, or this machine's with laptop_clock. None if t is
+        outside the ~2 s of history."""
         with self._lock:
-            h = list(self._history)
+            h = [(mono if laptop_clock else bt, pose) for bt, pose, mono in self._history]
         if len(h) < 2 or t < h[0][0] or t > h[-1][0] + 0.1:
             return None
         for (t0, a), (t1, b) in zip(h, h[1:]):
@@ -905,7 +938,13 @@ class TeleopSession:
         mapper = self.mapper
         snap["map"] = None if mapper is None else mapper.page_view()
         snap["map_stats"] = None if mapper is None else {
-            "scans": mapper.scans, "skipped": self.map_skipped}
+            "scans": mapper.scans, "skipped": self.map_skipped,
+            "camera_points": mapper.camera_points}
+        cam = self.camera
+        snap["camera"] = None if cam is None else {
+            "age_s": None if not math.isfinite(cam.age()) else round(cam.age(), 2),
+            "points": 0 if mapper is None else mapper.camera_points,
+            "detail": cam.describe() if hasattr(cam, "describe") else ""}
         snap["scan"] = None if scan is None else {
             "age_s": round(scan.age(), 2),
             "pts": [[round(x, 3), round(y, 3), int(bool(near))] for x, y, near in scan.points]}

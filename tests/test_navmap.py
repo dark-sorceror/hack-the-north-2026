@@ -174,6 +174,67 @@ class TestPlanner(unittest.TestCase):
         self.assertLess(r.ms, 250.0)
 
 
+@unittest.skipUnless(HAVE_NUMPY, "needs numpy")
+class TestCameraLayer(unittest.TestCase):
+    """Obstacles a camera saw: blocking, expiring, and safe from the lidar."""
+
+    def mapper(self):
+        t = {"now": 100.0}
+        return Mapper(clock=lambda: t["now"]), t
+
+    def test_camera_points_block_and_then_expire(self):
+        m, t = self.mapper()
+        self.assertFalse(m.has_map())
+        m.add_camera_points(Pose(), [(1.0, 0.0)], hold_s=2.0)     # 1 m ahead
+        self.assertTrue(m.has_map())
+        self.assertTrue(m.costmap().is_lethal(1.0, 0.0))
+        t["now"] += 1.0
+        self.assertTrue(m.costmap().is_lethal(1.0, 0.0))          # still fresh
+        t["now"] += 1.5                                            # past hold_s
+        self.assertFalse(m.costmap().is_lethal(1.0, 0.0))
+        self.assertFalse(m.has_map())
+
+    def test_seeing_them_again_refreshes_them(self):
+        m, t = self.mapper()
+        for _ in range(4):
+            m.add_camera_points(Pose(), [(1.0, 0.0)], hold_s=1.0)
+            t["now"] += 0.5
+        self.assertTrue(m.costmap().is_lethal(1.0, 0.0))
+
+    def test_the_lidar_does_not_erase_them(self):
+        """The point of a separate layer: a box below the lidar's plane is
+        exactly what its beams pass over."""
+        m, _ = self.mapper()
+        m.add_camera_points(Pose(), [(1.0, 0.0)], hold_s=60.0)
+        for _ in range(8):                                         # the lidar sees only the wall
+            m.add_scan(Pose(), [(3.0, 0.0)])
+        ix, iy = m.grid.cell(1.0, 0.0)
+        self.assertTrue(m.grid.seen_free()[iy, ix])                # the lidar calls it clear...
+        self.assertTrue(m.costmap().is_lethal(1.0, 0.0))           # ...the camera still blocks it
+
+    def test_a_route_goes_round_a_camera_only_obstacle(self):
+        m, _ = self.mapper()
+        box = [(1.5, y / 100) for y in range(-30, 31, 5)]          # a 0.6 m wide box, camera only
+        m.add_camera_points(Pose(), box, hold_s=60.0)
+        r = m.plan((0.0, 0.0), (3.0, 0.0))
+        self.assertTrue(r.ok, r.reason)
+        closest = min(math.hypot(px - bx, py - by)
+                      for px, py in r.path for bx, by in box)
+        self.assertGreater(closest, PlannerConfig().lethal_m - 0.05)
+
+    def test_the_page_shows_them_apart_from_the_lidar(self):
+        import base64
+        import zlib
+
+        m, _ = self.mapper()
+        m.add_camera_points(Pose(), [(1.0, 0.0)], hold_s=60.0)
+        for _ in range(3):
+            m.add_scan(Pose(), [(3.0, 0.0)])
+        v = m.page_view()
+        cells = np.frombuffer(zlib.decompress(base64.b64decode(v["data"])), np.uint8)
+        self.assertIn(4, set(cells.tolist()))                      # CAMERA, its own state
+
+
 def drive(ctl, pose, goal, t_max=40.0, dt=0.05, world=None, mapper=None, lag_scan=True):
     """Close the loop with perfect kinematics; re-scan the world every 0.2 s."""
     t, trail = 0.0, [pose]
