@@ -54,6 +54,6 @@ training_job = TrainingJob(
 )
 
 training_project = TrainingProject(
-    name="act-soarm101-pickup",
+    name="act-soarm101-pickup-t36",
     job=training_job,
 )

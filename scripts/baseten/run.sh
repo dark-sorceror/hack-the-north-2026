@@ -18,10 +18,23 @@ echo "=== deps ==="
 # ffmpeg: the dataset stores episodes as AV1 mp4, and decode is what feeds the
 # GPU. Without it the loader fails at the first video frame, not at startup.
 apt-get update -qq && apt-get install -y -qq ffmpeg >/dev/null 2>&1 || true
-# Pin to the version D-Robotics verified their BPU export tooling against.
-# The board runs the Hiwonder fork (0.5.1) but training touches no motors,
-# so stock lerobot is the right thing here.
-pip install --quiet "lerobot[feetech]==0.5.2" "accelerate"
+# PyPI only publishes lerobot up to 0.4.4; the 0.5.x line exists solely as
+# git tags, which is why D-Robotics' guide clones rather than pip installs.
+# v0.5.1 is the newest tag and matches the board's fork exactly (their guide
+# cites "v0.5.2", but no such tag exists).
+# Training touches no motors, so stock lerobot is right here - none of the
+# Hiwonder fork's patches are needed.
+pip install --quiet "lerobot[feetech] @ git+https://github.com/huggingface/lerobot.git@v0.5.1" "accelerate"
+
+# Installing lerobot can drag in its own torch and silently replace the CUDA
+# build this image ships with. Catch that here rather than after the dataset
+# has loaded and a GPU hour is gone.
+python - <<'PYCHK'
+import sys, torch
+print(f"  post-install torch {torch.__version__} cuda={torch.cuda.is_available()} gpus={torch.cuda.device_count()}")
+if not torch.cuda.is_available():
+    sys.exit("CUDA disappeared after installing lerobot - a CPU torch was pulled in")
+PYCHK
 
 echo "=== dataset ==="
 if [ ! -d "$DATA_DIR" ]; then
