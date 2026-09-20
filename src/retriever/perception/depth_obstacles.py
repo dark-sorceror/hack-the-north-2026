@@ -258,3 +258,90 @@ def calibrate(remote: Any, timeout_s: float = 10.0, poll_s: float = 0.05) -> tup
             raise TimeoutError(f"no depth grid with depth-camera intrinsics within "
                                f"{timeout_s:.0f} s: is the depth publisher running?")
         time.sleep(poll_s)
+
+
+def check(source: CameraObstacleSource, seconds: float = 3.0, poll_s: float = 0.05,
+          clock: Callable[[], float] = time.monotonic) -> tuple[bool, list[str]]:
+    """Watch a stream for `seconds` and report whether navigation can use it.
+
+    The preflight for a hardware test: it changes nothing and asks the questions
+    that have actually gone wrong --- wrong publisher (a detector stream has no
+    depth intrinsics), silent publisher, a grid with no valid cells, a mount left
+    at its placeholder. Returns (ready, lines); lines are prefixed "ok", "!!" for
+    something that blocks, and "??" for something worth knowing.
+    """
+    lines: list[str] = []
+    ready = True
+    remote = source.remote
+    seen: list[Any] = []
+    ages: list[float] = []
+    last = None
+    deadline = clock() + seconds
+    while clock() < deadline:
+        pkt = remote.latest_packet()
+        if pkt is not None and pkt is not last:
+            seen.append(pkt)
+            if pkt.source_age_s is not None:
+                ages.append(pkt.source_age_s)
+            last = pkt
+        time.sleep(poll_s)
+
+    header = remote.header
+    if not isinstance(header, dict):
+        return False, ["!! no header: nothing is publishing on that host and port. Start the "
+                       "depth publisher on whichever board holds the camera."]
+    lines.append(f"ok header from camera {header.get('camera')!r}, frames "
+                 f"{header.get('frame_w')}x{header.get('frame_h')}, "
+                 f"detector {header.get('detector')!r}")
+    found = depth_camera_intrinsics(header)
+    if found is None:
+        ready = False
+        lines.append("!! no usable depth intrinsics in the header (or it says the grid is aligned "
+                     "to colour): this looks like a detection stream, not the depth publisher.")
+    else:
+        intr, size = found
+        lines.append(f"ok depth intrinsics: fx {intr.fx:.1f}, fy {intr.fy:.1f} at "
+                     f"{size[0]}x{size[1]}, not aligned to colour")
+    if not seen:
+        lines.append(f"!! no messages in {seconds:.1f} s: the publisher is reachable but silent.")
+        lines.append("NOT READY")
+        return False, lines
+    lines.append(f"ok {len(seen)} messages in {seconds:.1f} s ({len(seen) / seconds:.1f}/s)")
+    if ages:
+        lines.append(f"ok every message dated: age when sent {1000 * min(ages):.0f}-"
+                     f"{1000 * max(ages):.0f} ms")
+    else:
+        lines.append("?? no age_s on any message: capture times fall back to arrival, so a slow "
+                     "link will look like camera lag. Check the publisher's version.")
+    grid = seen[-1].depth_grid_m()
+    if grid is None:
+        ready = False
+        lines.append("!! the newest message carries no depth grid.")
+    else:
+        import numpy as np
+
+        g = np.asarray(grid)
+        valid = g > 0
+        share = float(valid.mean())
+        nearest = f"{float(g[valid].min()):.2f} m nearest" if share else "nothing in range"
+        lines.append(f"ok grid {g.shape[1]}x{g.shape[0]} cells, {100 * share:.0f}% with a "
+                     f"reading, {nearest}")
+        if share < 0.05:
+            ready = False
+            lines.append("!! almost no valid cells: is the lens covered, or the scene beyond "
+                         "range?")
+    obs = source.latest()
+    if obs is None:
+        lines.append("?? no obstacle points yet --- see the lines above for why.")
+    else:
+        lines.append(f"ok obstacle points: {source.describe()}")
+        lines.append(f"ok dated {clock() - obs.t:.2f} s ago on this laptop's clock")
+    m = source.mount
+    lines.append(f"ok mount in use: {m.height_m:.2f} m up, {m.forward_m:.2f} m forward, "
+                 f"{math.degrees(m.pitch_rad):.1f}° down")
+    if (m.forward_m, m.pitch_rad) == (DEFAULT_MOUNT.forward_m, DEFAULT_MOUNT.pitch_rad):
+        lines.append("?? that forward offset and tilt are still the placeholders: measure the "
+                     "first with a ruler, and get the tilt from `calibrate` over open floor.")
+    lines.append("READY: navigation can consume this stream" if ready
+                 else "NOT READY: fix the !! lines above")
+    return ready, lines
