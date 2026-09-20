@@ -8,6 +8,14 @@ installed. SIGTERM is handled like Ctrl-C, so `systemctl stop` stops the motors 
 just the process. One log line at start says where it listens, which driver, and every
 timeout, which is the first thing to check when the robot stops "for no reason".
 
+On the Pi: the fake needs nothing installed. `--driver real` needs pyserial
+(pi/setup.sh installs python3-serial) for the DDSM115 wheels:
+
+    python3 scripts/fake_pi.py --driver real --wheel-port /dev/serial/by-id/<RS485 adapter>
+
+Check the wheels with scripts/wheel_check.py first: left/right IDs, forward
+direction and counts/rev are unverified, and --wheel-radius must be measured.
+
 A real e-stop button and vacuum relay work with either driver, so the fake tank
 can run on a Pi 4 with real GPIO (BCM numbers):
 
@@ -26,7 +34,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from retriever.bridge.drivers import build_real_driver  # noqa: E402
+from retriever.bridge.drivers import (  # noqa: E402
+    DDSM115_COUNTS_PER_REV,
+    build_real_driver,
+    parse_id_list,
+)
 from retriever.bridge.fake_driver import FakeTankDriver  # noqa: E402
 from retriever.bridge.gpio import EstopButton, VacuumOverlay, VacuumRelay  # noqa: E402
 from retriever.bridge.protocol import DEFAULT_PORT  # noqa: E402
@@ -43,8 +55,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="", help='address to listen on ("" = all)')
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="0 picks a free port")
     parser.add_argument("--driver", choices=("fake", "real"), default="fake")
-    parser.add_argument("--wheel-port", default="/dev/ttyUSB0")
-    parser.add_argument("--arm-port", default=None)
+    parser.add_argument(
+        "--wheel-port", default=None,
+        help="real: the DDSM115 USB-RS485 adapter (default: $DDSM115_PORT, else "
+             "the one WCH adapter; use /dev/serial/by-id/... to pick between two)")
+    parser.add_argument("--left-ids", default="1,2", help="real: left-side DDSM115 motor IDs")
+    parser.add_argument("--right-ids", default="3,4", help="real: right-side DDSM115 motor IDs")
+    parser.add_argument(
+        "--wheel-flipped-ids", default="1,2",
+        help="real: mirror-mounted motors, which get -rpm (measured on the robot: 1,2; "
+             "the teammate's 3,4 drove it back-end first)")
+    parser.add_argument(
+        "--wheel-counts-per-rev", type=int, default=DDSM115_COUNTS_PER_REV,
+        help="real: DDSM115 position counts per wheel turn (wheel_check.py rev)")
+    parser.add_argument(
+        "--wheel-reply-timeout-ms", type=float, default=10.0,
+        help="real: wait per motor reply; a call blocks at most 4x (this + 10 ms)")
     parser.add_argument("--estop-pin", default=None,
                         help="BCM GPIO of a physical e-stop switch to GND (e.g. 17)")
     parser.add_argument(
@@ -58,7 +84,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--motion-timeout-ms", type=float, default=500.0, help="motion deadman")
     parser.add_argument("--state-hz", type=float, default=50.0)
     parser.add_argument("--max-wheel-mps", type=float, default=0.8)
-    parser.add_argument("--wheel-radius", type=float, default=defaults.wheel_radius_m)
+    parser.add_argument(
+        "--wheel-radius", type=float, default=defaults.wheel_radius_m,
+        help="metres. The default is a placeholder: MEASURE the tyre (diameter/2)")
     parser.add_argument("--track-width", type=float, default=defaults.track_width_m)
     parser.add_argument("--scrub-factor", type=float, default=defaults.scrub_factor)
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
@@ -115,8 +143,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         geo = TankGeometry(args.wheel_radius, args.track_width, args.scrub_factor)
+        driver = build_driver(args, geo, relay)
         server = BridgeServer(
-            build_driver(args, geo, relay),
+            driver,
             args.host,
             args.port,
             geo=geo,
@@ -126,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             max_wheel_mps=args.max_wheel_mps,
             estop_input=button,
         )
-    except (NotImplementedError, ValueError) as exc:
+    except (ConnectionError, FileNotFoundError, ImportError, RuntimeError, ValueError) as exc:
         print(f"fake_pi: {exc}", file=sys.stderr)
         _close(relay, button)
         return 2
@@ -141,16 +170,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fake_pi: {exc}", file=sys.stderr)
         return 1
     finally:
-        _close(relay, button)   # relay off, pins released
+        # server.close() already ran driver.stop(); close() also frees the wheel port
+        _close(driver if hasattr(driver, "close") else None, relay, button)
     return 0
 
 
 def build_driver(
     args: argparse.Namespace, geo: TankGeometry, relay: VacuumRelay | None = None
 ) -> HardwareDriver:
-    """The fake driver, or the real hardware (which raises NotImplementedError for now)."""
+    """The fake driver, or the real hardware."""
     if args.driver == "real":
-        return build_real_driver(args.wheel_port, args.arm_port, geo)
+        return build_real_driver(
+            args.wheel_port, geo=geo, vacuum=relay,
+            left_ids=parse_id_list(args.left_ids), right_ids=parse_id_list(args.right_ids),
+            flipped_ids=parse_id_list(args.wheel_flipped_ids),
+            wheel_counts_per_rev=args.wheel_counts_per_rev,
+            wheel_reply_timeout_s=args.wheel_reply_timeout_ms / 1000.0)
     driver: HardwareDriver = FakeTankDriver(geo)
     if relay is not None:
         driver = VacuumOverlay(driver, relay)
@@ -160,7 +195,10 @@ def build_driver(
 def _close(*parts: object) -> None:
     for part in parts:
         if part is not None:
-            part.close()
+            try:
+                part.close()
+            except Exception as exc:  # one part failing must not skip the rest
+                print(f"closing {type(part).__name__}: {exc}", file=sys.stderr)
 
 
 def _pin(spec: str) -> int | str:
