@@ -369,6 +369,30 @@ class TestFollower(unittest.TestCase):
         self.assertIsNotNone(ctl._backoff_until,
                              "never backed off: blocked and clear ticks cancelled out")
 
+    def test_sticks_to_a_route_instead_of_flipping_between_equal_ones(self):
+        """Two ways round are often within a few percent, and scan noise flips
+        the winner twice a second: the robot turns one way, then the other, and
+        gains no ground. A committed route is kept unless clearly beaten."""
+        m, _ = self.mapper()
+        world = CHAIR + room()
+        m.add_scan(Pose(), [(x, y) for x, y in world])
+        ctl = PathFollower(m, Limits(v_max=0.3, w_max=1.0, pos_tol=0.08))
+        pose, goal = Pose(0.0, 0.0, 0.0), Pose(2.45, 0.55, 0.0)
+        ctl.step_observation(Observation(joints={}, base=pose, t=0.0), goal)
+        first = list(ctl.path or [])
+        self.assertTrue(first, "no route at all")
+        side = lambda path: sum(y for _, y in path)      # which way round it goes
+
+        flips = 0
+        for i in range(1, 25):                            # 12 s of re-planning
+            m.add_scan(Pose(), [(x, y) for x, y in world])   # same room, fresh scans
+            ctl._planned_at = -math.inf                   # force a replan every step
+            ctl.step_observation(Observation(joints={}, base=pose, t=i * 0.5), goal)
+            if ctl.path and (side(ctl.path) > 0) != (side(first) > 0):
+                flips += 1
+                first = list(ctl.path)
+        self.assertLessEqual(flips, 1, f"route flipped sides {flips} times while standing still")
+
     def test_waits_when_the_map_goes_stale(self):
         m, clock = self.mapper()
         m.add_scan(Pose(), [(x, y) for x, y in room()])

@@ -41,8 +41,13 @@ from retriever.navigation.grid import OccupancyGrid, distance_field
 class PlannerConfig:
     robot_radius_m: float = 0.32     # circumscribed: hypot(0.25, 0.20) for the default footprint
     margin_m: float = 0.06           # past the body: tape-measure error, odometry smear
-    cost_band_m: float = 0.40        # beyond lethal, cost falls 1 -> 0 over this
-    cost_weight: float = 4.0         # extra per metre at cost 1
+    # How hard to prefer open space. Measured on a free-standing post with room
+    # either side: 0.40/4.0 passed it at 0.67 m, 0.60/8.0 at 0.87 m for 7% more
+    # driving, 0.80/14.0 at 1.04 m for 19% more -- and 1.00/20.0 bought no more
+    # room at all, just distance. Where the gap is tight none of it helps: the
+    # route is already as far off as the geometry allows.
+    cost_band_m: float = 0.60        # beyond lethal, cost falls 1 -> 0 over this
+    cost_weight: float = 8.0         # extra per metre at cost 1
     unknown_weight: float = 0.5      # extra per metre through never-seen cells
     plan_resolution_m: float = 0.10
     escape_m: float = 0.45           # lethal cells this near the start are passable (at a price)
@@ -55,8 +60,19 @@ class PlannerConfig:
 
     @classmethod
     def for_footprint(cls, front_m: float, rear_m: float, half_width_m: float,
-                      **kw) -> PlannerConfig:
-        return cls(robot_radius_m=math.hypot(max(front_m, rear_m), half_width_m), **kw)
+                      tight: bool = False, **kw) -> PlannerConfig:
+        """Circumscribed radius by default: clear at every heading, including a
+        turn on the spot, so a route is safe whatever the follower does.
+
+        `tight` uses the inscribed radius (the half width) instead. The body
+        fits through the gaps that allows, but a spin inside one does not: the
+        corners reach `hypot(front, half_width)`. That is a deliberate trade,
+        and it is the bubble that makes it survivable -- it sweeps the real
+        footprint at 20 Hz, so the cost of planning too optimistically is the
+        robot stopping short, not scraping a chair leg.
+        """
+        r = half_width_m if tight else math.hypot(max(front_m, rear_m), half_width_m)
+        return cls(robot_radius_m=r, **kw)
 
 
 @dataclass
