@@ -115,14 +115,14 @@ What they fix:
 - A fresh clone of the fork at `a24998f7` will be *less reliable* than this board
 - Re-cloning, `git checkout .`, or `git stash` in that directory **will break the arm**
 
-All five are captured in `scripts/lerobot-board-patches.patch`. To rebuild the
+All five are captured in `SO-101/scripts/lerobot-board-patches.patch`. To rebuild the
 board's software state from scratch:
 
 ```bash
 git clone https://github.com/Hiwonder-official/hiwonder-SoArm-101.git
 cd hiwonder-SoArm-101
 git checkout a24998f7ba3c77ea445b48c92ad15c14a50e492a
-git apply /path/to/scripts/lerobot-board-patches.patch
+git apply /path/to/SO-101/scripts/lerobot-board-patches.patch
 uv sync                      # needs Python 3.12; 3.14 breaks draccus
 ```
 

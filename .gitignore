@@ -1,8 +1,17 @@
-.venv/
+# Python
 __pycache__/
-.pytest_cache/
+*.py[cod]
 *.egg-info/
+.venv/
+.pytest_cache/
+
+# secrets and local config
 .env
+
+# dataset tarballs staged for upload - large, regenerable from the board
+SO-101/scripts/baseten/*.tar.gz
+
+# local scratch and generated artifacts
 .reference/
 artifacts/
 *.pcm
