@@ -22,26 +22,36 @@ echo "=== deps ==="
 # Deliberately not silenced with "|| true": both are hard requirements, and
 # swallowing a failed apt here just moves the error somewhere less obvious.
 apt-get update -qq
-apt-get install -y -qq git ffmpeg
+apt-get install -y -qq git ffmpeg curl
 command -v git >/dev/null || { echo "git missing after apt install"; exit 1; }
 command -v ffmpeg >/dev/null || { echo "ffmpeg missing after apt install"; exit 1; }
 echo "  git $(git --version | awk '{print $3}') | ffmpeg $(ffmpeg -version 2>/dev/null | head -1 | awk '{print $3}')"
-# PyPI only publishes lerobot up to 0.4.4; the 0.5.x line exists solely as
-# git tags, which is why D-Robotics' guide clones rather than pip installs.
-# v0.5.1 is the newest tag and matches the board's fork exactly (their guide
-# cites "v0.5.2", but no such tag exists).
-# Training touches no motors, so stock lerobot is right here - none of the
-# Hiwonder fork's patches are needed.
-pip install --quiet "lerobot[feetech] @ git+https://github.com/huggingface/lerobot.git@v0.5.1" "accelerate"
 
-# Installing lerobot can drag in its own torch and silently replace the CUDA
-# build this image ships with. Catch that here rather than after the dataset
-# has loaded and a GPU hour is gone.
+# The pytorch:2.7.0 image ships Python 3.11, but lerobot declares
+# requires-python >=3.12, so its own interpreter cannot install it. Rather than
+# hunt for a CUDA image with 3.12, use uv to fetch a managed 3.12 and build a
+# venv - the same approach the RDK board uses. CUDA itself comes from the host
+# driver, so the base image's torch is not needed; we install a cu128 build.
+export PATH="$HOME/.local/bin:$PATH"
+command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+echo "  uv $(uv --version | awk '{print $2}')"
+
+VENV=/opt/lerobot-venv
+uv venv --python 3.12 "$VENV"
+# shellcheck disable=SC1091
+source "$VENV/bin/activate"
+python -c "import sys; print('  venv python', sys.version.split()[0])"
+
+# CUDA wheel index, or pip resolves a CPU build and the H100 sits idle.
+uv pip install --quiet torch --index-url https://download.pytorch.org/whl/cu128
+uv pip install --quiet "lerobot[feetech] @ git+https://github.com/huggingface/lerobot.git@v0.5.1" accelerate
+
 python - <<'PYCHK'
 import sys, torch
-print(f"  post-install torch {torch.__version__} cuda={torch.cuda.is_available()} gpus={torch.cuda.device_count()}")
+print(f"  torch {torch.__version__} cuda={torch.cuda.is_available()} gpus={torch.cuda.device_count()}")
 if not torch.cuda.is_available():
-    sys.exit("CUDA disappeared after installing lerobot - a CPU torch was pulled in")
+    sys.exit("no CUDA in the venv - a CPU torch was resolved")
 PYCHK
 
 echo "=== dataset ==="
