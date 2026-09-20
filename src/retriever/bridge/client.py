@@ -387,10 +387,16 @@ class BridgeRobot:
     def _on_state(self, state: State) -> None:
         with self._changed:
             previous = self._state
+            # state.yaw: the Pi's gyro heading, when it has one. Rotation from it,
+            # distance from the wheels (odometry.TankOdometry.update).
             if previous is None:
-                self._odometry.update(state.left_ticks, state.right_ticks, 0.0)  # records only
+                self._odometry.update(
+                    state.left_ticks, state.right_ticks, 0.0, state.yaw
+                )  # records only
             elif state.t > previous.t:
-                self._odometry.update(state.left_ticks, state.right_ticks, state.t - previous.t)
+                self._odometry.update(
+                    state.left_ticks, state.right_ticks, state.t - previous.t, state.yaw
+                )
             self._state = state
             self._state_received_at = time.monotonic()
             self._states_received += 1

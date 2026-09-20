@@ -150,6 +150,11 @@ class State:
     bubble_reason: str | None = None     # why, in words; "" when clear
     nearest_m: float | None = None       # body -> nearest obstacle; None without a fresh scan
     stop_m: float | None = None          # body clearance the current command needs
+    # Gyro heading (the D435i's IMU, bridge/imu.py): radians, counter-clockwise,
+    # unwrapped, from wherever it started. Only its CHANGES mean anything: the
+    # laptop's odometry takes its heading from them instead of from the wheels,
+    # which slide in every skid-steer turn. Left off the line without a gyro.
+    yaw: float | None = None
 
 
 @dataclass(frozen=True)
@@ -380,6 +385,7 @@ _RULES: dict[type[Message], dict[str, _Check]] = {
         "bubble_reason": _optional(_text),
         "nearest_m": _optional(_nonneg),
         "stop_m": _optional(_nonneg),
+        "yaw": _optional(_number),
     },
     Scan: {
         "t": _number,
@@ -392,7 +398,7 @@ _RULES: dict[type[Message], dict[str, _Check]] = {
 # Fields left off the line when None, so a message without them is
 # byte-identical to what a v1 peer sends and expects.
 _OMIT_IF_NONE: dict[type[Message], tuple[str, ...]] = {
-    State: ("bubble", "bubble_reason", "nearest_m", "stop_m"),
+    State: ("bubble", "bubble_reason", "nearest_m", "stop_m", "yaw"),
 }
 _BY_TYPE: dict[str, type[Message]] = {cls.TYPE: cls for cls in _RULES}
 _REQUIRED: dict[type[Message], tuple[str, ...]] = {

@@ -97,6 +97,7 @@
       <tr><td class="k">measured</td><td class="v" id="meas">–</td></tr>
       <tr><td class="k">pose</td><td class="v" id="pose">–</td></tr>
       <tr><td class="k">driven</td><td class="v" id="odo">–</td></tr>
+      <tr><td class="k">heading from</td><td class="v" id="hdg">–</td></tr>
     </table>
     <div id="bubble" class="warn"></div>
     <details class="cal" id="cal"><summary>Calibrate turning</summary>
@@ -380,6 +381,10 @@ function paint() {
   const deg = ((s.pose[2] * 180 / Math.PI) % 360 + 540) % 360 - 180;       // -180..180
   $('pose').textContent = `${fmt(s.pose[0])}, ${fmt(s.pose[1])} m ${fmt(deg, 0)}°`;
   $('odo').textContent = `${s.odometer_m.toFixed(2)} m`;
+  const h = s.heading || {};
+  $('hdg').textContent = !h.source ? '–' : h.source === 'gyro'
+    ? 'gyro' + (h.slip_pct != null ? ` (wheels ${h.slip_pct > 0 ? '+' : ''}${h.slip_pct}%)` : '')
+    : 'wheels (no gyro)';
   const b = s.bubble;
   $('bubble').textContent = !b ? (s.scan ? '' : 'no lidar on the Pi: nothing stops it but you')
     : b.state === 'clear' ? '' : `lidar bubble ${b.state}: ${b.reason}`;
@@ -398,7 +403,7 @@ function paint() {
     let what;
     if (a.phase === 'wait') what = `<span class="st">Arrived</span> (${a.detail}) · heading home in a moment`;
     else if (a.phase === 'face') what = `<span class="st">Turning</span> to face the way it started`;
-    else what = `<span class="st">Driving</span> to ${where}` + (a.dist != null ? ` · ${a.dist.toFixed(2)} m to go` : '')
+    else what = `<span class="st">${a.reverse ? 'Backing up' : 'Driving'}</span> to ${where}` + (a.dist != null ? ` · ${a.dist.toFixed(2)} m to go` : '')
                + (a.then_home ? ' · then back' : '');
     box.innerHTML = what + `<br><span class="k">${how}</span>`;
   } else if (a.status) {
